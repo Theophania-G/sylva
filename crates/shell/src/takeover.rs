@@ -47,7 +47,7 @@ impl DesktopHierarchy {
     pub fn hide_icons(&self) -> bool {
         match self.list_view {
             Some(lv) if !lv.is_invalid() => {
-                let _ = unsafe { ShowWindow(lv, SW_HIDE) };
+                let _hid = unsafe { ShowWindow(lv, SW_HIDE) };
                 true
             }
             _ => false,
@@ -58,7 +58,7 @@ impl DesktopHierarchy {
     pub fn restore_icons(&self) {
         if let Some(lv) = self.list_view {
             if !lv.is_invalid() {
-                let _ = unsafe { ShowWindow(lv, SW_SHOW) };
+                let _shw = unsafe { ShowWindow(lv, SW_SHOW) };
             }
         }
     }
@@ -74,7 +74,14 @@ impl DesktopHierarchy {
 pub fn probe() -> Option<DesktopHierarchy> {
     let progman = find_class_window(CLASS_PROGMAN)?;
     // 触发 WorkerW / DefView 生成（幂等）
-    unsafe { SendMessageW(progman, WM_SPAWN_WORKERW, Default::default(), Default::default()) };
+    unsafe {
+        SendMessageW(
+            progman,
+            WM_SPAWN_WORKERW,
+            Default::default(),
+            Default::default(),
+        )
+    };
 
     let def_view = find_def_view();
     let worker = def_view
@@ -128,8 +135,13 @@ fn find_class_descendant(hwnd: HWND, class_name: &str) -> Option<HWND> {
         class_name: class_name.to_string(),
         found: None,
     };
-    let _ = unsafe {
-        EnumChildWindows(Some(hwnd), Some(enum_child_cb), LPARAM(&mut ctx as *mut _ as isize));
+    // 无尾分号：让 BOOL 作为块值，避免 unused_must_use
+    let _enum = unsafe {
+        EnumChildWindows(
+            Some(hwnd),
+            Some(enum_child_cb),
+            LPARAM(&mut ctx as *mut _ as isize),
+        )
     };
     ctx.found
 }
@@ -166,7 +178,10 @@ mod tests {
     #[test]
     fn wide_conversion_roundtrip() {
         assert_eq!(wide_to_string_test(&wide("Progman")), "Progman");
-        assert_eq!(wide_to_string_test(&wide("SHELLDLL_DefView")), "SHELLDLL_DefView");
+        assert_eq!(
+            wide_to_string_test(&wide("SHELLDLL_DefView")),
+            "SHELLDLL_DefView"
+        );
     }
 
     fn wide_to_string_test(w: &[u16]) -> String {

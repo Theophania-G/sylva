@@ -11,6 +11,8 @@
 
 #![allow(dead_code)] // 骨架阶段；随里程碑推进逐步移除
 
+pub mod com;
+pub mod items;
 pub mod takeover;
 
 /// 顶层便捷函数：探测桌面根窗口 `Progman`。
