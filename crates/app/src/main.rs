@@ -208,7 +208,7 @@ fn run(data_dir: &std::path::Path) -> fence_core::Result<()> {
         tracing::info!(ms, "FENCE_AUTOSTOP_MS 已设置，到点自动退出");
     }
 
-    tracing::info!("首个栅栏已呈现；Ctrl+C 退出并恢复桌面图标");
+    tracing::info!("首个栅栏已呈现；Ctrl+Shift+F10（或 Ctrl+C）退出并恢复桌面图标");
     run_message_loop();
 
     tracing::info!("已退出");
