@@ -37,18 +37,27 @@ const DEMO_ICON_LIMIT: usize = 15;
 /// 栅栏演示的固定位置（物理像素）。
 const FENCE_POS: (f32, f32) = (120.0, 90.0);
 
-/// Ctrl+C 恢复现场所需的运行时上下文。
-struct ShutdownCtx {
+/// RAII：隐藏的真实图标在退出（含错误路径）时无条件恢复。
+/// 反冲突约束的兜底——任何退出路径都不能让桌面图标永久消失。
+struct IconGuard {
     hierarchy: DesktopHierarchy,
-    overlay: HWND,
 }
 
-// 仅存原始窗口句柄；它们指向与进程同生命周期的窗口，跨线程读取安全
-//（Ctrl+C 处理线程只做恢复/通知，不做任何窗口内存访问）。
-unsafe impl Send for ShutdownCtx {}
-unsafe impl Sync for ShutdownCtx {}
+impl IconGuard {
+    fn new(hierarchy: DesktopHierarchy) -> Self {
+        hierarchy.hide_icons();
+        Self { hierarchy }
+    }
+}
 
-static RUNTIME: OnceLock<ShutdownCtx> = OnceLock::new();
+impl Drop for IconGuard {
+    fn drop(&mut self) {
+        self.hierarchy.restore_icons();
+    }
+}
+
+/// Ctrl+C 通知主循环退出的 overlay 窗口句柄（仅信号，不做窗口访问）。
+static OVERLAY_HWND: OnceLock<usize> = OnceLock::new();
 
 fn main() {
     // M1.5 起全部使用物理像素，必须声明进程 DPI 感知
@@ -88,11 +97,11 @@ fn run(data_dir: &std::path::Path) -> fence_core::Result<()> {
         "桌面状态已加载"
     );
 
-    // 1) 壳层接管：探测层级并隐藏真实图标（反冲突约束：不重挂/不销毁他人窗口）
+    // 1) 壳层接管：探测层级并隐藏真实图标（反冲突约束：不重挂/不销毁他人窗口）。
+    //    守卫确保后续任何失败都会恢复图标。
     let hierarchy = fence_shell::takeover::probe()
         .ok_or_else(|| fence_core::CoreError::Shell("未找到桌面根窗口 Progman".into()))?;
-    let hidden = hierarchy.hide_icons();
-    tracing::info!(hidden, "桌面壳层接管完成");
+    let _guard = IconGuard::new(hierarchy);
 
     // 2) GPU 上下文 + overlay + 合成器
     let device = RenderDevice::new().map_err(|e| fence_core::CoreError::Render(e.to_string()))?;
@@ -170,11 +179,8 @@ fn run(data_dir: &std::path::Path) -> fence_core::Result<()> {
         height: fence_h,
     }]);
 
-    // 7) Ctrl+C：恢复真实图标并让消息循环干净退出
-    let _ = RUNTIME.set(ShutdownCtx {
-        hierarchy,
-        overlay: overlay.hwnd,
-    });
+    // 7) Ctrl+C：通知消息循环干净退出（图标由 _guard 在返回时恢复）
+    let _ = OVERLAY_HWND.set(overlay.hwnd.0 as usize);
     unsafe {
         let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
     }
@@ -186,11 +192,15 @@ fn run(data_dir: &std::path::Path) -> fence_core::Result<()> {
     Ok(())
 }
 
-/// Ctrl+C / 关闭终端：恢复隐藏的真实图标，并通知主循环退出。
+/// Ctrl+C / 关闭终端：通知主循环退出（信号线程不做窗口访问）。
 unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL {
-    if let Some(ctx) = RUNTIME.get() {
-        ctx.hierarchy.restore_icons();
-        let _ = PostMessageW(Some(ctx.overlay), WM_APP_QUIT, WPARAM(0), LPARAM(0));
+    if let Some(hwnd) = OVERLAY_HWND.get() {
+        let _ = PostMessageW(
+            Some(HWND(*hwnd as *mut core::ffi::c_void)),
+            WM_APP_QUIT,
+            WPARAM(0),
+            LPARAM(0),
+        );
     }
     BOOL(1) // 已处理，阻止默认终止行为（让主循环干净退出）
 }
