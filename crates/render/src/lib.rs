@@ -1,13 +1,31 @@
-//! `fence-render`：DirectComposition / Direct2D / DirectWrite 渲染层。
+//! `fence-render`：渲染层。
 //!
-//! - DirectComposition：驱动覆盖层窗口的视觉树，每个栅栏一个 Visual，硬件合成动画
-//! - Direct2D：栅栏背景（圆角、亚克力降级）、图标位图
-//! - DirectWrite：图标标签文字（DPI 感知）
+//! 负责桌面 overlay 窗口与 DirectComposition / Direct2D / DirectWrite 绘制：
+//! - `device`：D3D11 + DXGI + DComp + D2D/DWrite 工厂（GPU 上下文）
+//! - `overlay`：挂在桌面壳层下的 overlay 窗口（穿透命中测试、无重定向位图）
+//! - `surface`：DComp 合成表面（每帧 BeginDraw→D2D 绘制→EndDraw→Commit）
+//! - `scene`：与应用无关的场景模型（栅栏矩形、图标、文字）
+//! - `draw`：把场景画进 D2D 目标（圆角栅栏、图标位图、文字）
+//! - `theme`：配色与尺寸（物理像素）
 //!
-//! M1 起填充；当前为占位，保证 workspace 可编译。
+//! 坐标约定：本层全部使用**物理像素**（虚拟屏幕坐标），逻辑坐标→物理像素
+//! 的 DPI 换算由 App 层完成。
+//!
+//! 性能约定（设计文档 §7.2）：D2D 位图/画笔按需创建并缓存；单帧只绘制脏区域
+//! 更新；渲染只在内容变化时进行，空闲时 0% CPU。
 
-#![allow(dead_code)]
+#![allow(dead_code)] // 骨架阶段；随里程碑推进逐步移除
 
-pub fn placeholder() -> &'static str {
-    "render"
-}
+pub mod device;
+pub mod draw;
+pub mod overlay;
+pub mod scene;
+pub mod surface;
+pub mod theme;
+
+pub use device::RenderDevice;
+pub use draw::{draw_scene, IconStore, TextFormats};
+pub use overlay::{run_message_loop, HitRect, OverlayWindow};
+pub use scene::Scene;
+pub use surface::{CompositionSurface, Frame};
+pub use theme::Theme;

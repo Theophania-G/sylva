@@ -67,6 +67,7 @@ name = "fence-render"
 version = "0.1.0"
 dependencies = [
  "fence-core",
+ "fence-shell",
  "windows",
 ]
 

@@ -15,6 +15,8 @@ license = "MIT"
 # 共享依赖：各 crate 通过 `workspace = true` 引用，保证版本唯一。
 [workspace.dependencies]
 fence-core = { path = "crates/core" }
+fence-shell = { path = "crates/shell" }
+fence-render = { path = "crates/render" }
 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -40,9 +42,11 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_DirectComposition",
     "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Security",
 ] }
