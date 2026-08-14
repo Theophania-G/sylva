@@ -1,0 +1,21 @@
+[package]
+name = "fence-app"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fence-core = { workspace = true }
+fence-shell = { path = "../shell" }
+fence-render = { path = "../render" }
+
+crossbeam-channel = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "fence"
+path = "src/main.rs"

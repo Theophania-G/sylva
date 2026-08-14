@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/shell",
+    "crates/render",
+    "crates/app",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+# 共享依赖：各 crate 通过 `workspace = true` 引用，保证版本唯一。
+[workspace.dependencies]
+fence-core = { path = "crates/core" }
+
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+crossbeam-channel = "0.5.16"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# windows-rs 功能集：随各里程碑按需增补。
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

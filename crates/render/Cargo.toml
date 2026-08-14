@@ -1,0 +1,9 @@
+[package]
+name = "fence-render"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fence-core = { workspace = true }
+windows = { workspace = true }

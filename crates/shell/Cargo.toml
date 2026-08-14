@@ -1,0 +1,10 @@
+[package]
+name = "fence-shell"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+fence-core = { workspace = true }
+crossbeam-channel = { workspace = true }
+windows = { workspace = true }
