@@ -12,6 +12,7 @@
 #![allow(dead_code)] // 骨架阶段；随里程碑推进逐步移除
 
 pub mod com;
+pub mod icons;
 pub mod items;
 pub mod takeover;
 
