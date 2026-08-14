@@ -18,5 +18,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 [[bin]]
-name = "fence"
+name = "sylva"
 path = "src/main.rs"

@@ -1,6 +1,6 @@
 //! 应用级设置与持久化。
 //!
-//! 数据目录由上层注入（Windows 上为 `%APPDATA%\FenceOrganizer`），
+//! 数据目录由上层注入（Windows 上为 `%APPDATA%\Sylva`），
 //! 核心层不感知平台路径，保持可测。
 
 use serde::{Deserialize, Serialize};

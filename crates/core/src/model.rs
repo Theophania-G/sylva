@@ -88,10 +88,45 @@ pub enum FenceState {
     Folded,
 }
 
+/// 栅栏的窗口模式（决定背景填充与描边风格）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FenceStyle {
+    /// 半透明填充 + 细边框（默认）。
+    Filled,
+    /// 内部完全透明，仅中粗圆角描边。
+    Outline,
+    /// 极浅填充（接近透明的玻璃感）+ 细边框。
+    Glass,
+}
+
+impl FenceStyle {
+    /// 控制台显示名。
+    pub fn label(&self) -> &'static str {
+        match self {
+            FenceStyle::Filled => "填充",
+            FenceStyle::Outline => "描边",
+            FenceStyle::Glass => "玻璃",
+        }
+    }
+
+    /// 循环切换到下一个模式。
+    pub fn next(self) -> Self {
+        match self {
+            FenceStyle::Filled => FenceStyle::Outline,
+            FenceStyle::Outline => FenceStyle::Glass,
+            FenceStyle::Glass => FenceStyle::Filled,
+        }
+    }
+}
+
 /// 栅栏外观配置。
+///
+/// `#[serde(default)]`：旧版 `desk.json` 缺少新增字段时自动取默认值，
+/// 保证配置向后兼容。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FenceAppearance {
-    /// 背景色 RGBA（0.0..=1.0）。
+    /// 背景色 RGBA（0.0..=1.0）；描边模式下不使用。
     pub bg_color: [f32; 4],
     /// 圆角半径（逻辑 px）。
     pub corner_radius: f32,
@@ -105,6 +140,10 @@ pub struct FenceAppearance {
     pub icon_size: f32,
     /// 图标间距（逻辑 px）。
     pub gap: f32,
+    /// 窗口模式（填充 / 描边 / 玻璃）。
+    pub style: FenceStyle,
+    /// 边框描边宽度（逻辑 px；描边模式用中粗线）。
+    pub border_width: f32,
 }
 
 impl Default for FenceAppearance {
@@ -117,6 +156,8 @@ impl Default for FenceAppearance {
             padding: 12.0,
             icon_size: 48.0,
             gap: 10.0,
+            style: FenceStyle::Filled,
+            border_width: 1.0,
         }
     }
 }
@@ -339,5 +380,21 @@ mod tests {
         assert!(!r.contains(Vec2 { x: 111.0, y: 10.0 }));
         let inner = r.inset(5.0);
         assert_eq!(inner, Rect::new(15.0, 15.0, 90.0, 40.0));
+    }
+
+    #[test]
+    fn fence_style_cycles() {
+        assert_eq!(FenceStyle::Filled.next(), FenceStyle::Outline);
+        assert_eq!(FenceStyle::Outline.next(), FenceStyle::Glass);
+        assert_eq!(FenceStyle::Glass.next(), FenceStyle::Filled);
+    }
+
+    #[test]
+    fn fence_appearance_serde_backward_compatible() {
+        // 旧版 desk.json 的栅栏外观（无 style / border_width）应能加载并取默认值
+        let old = r#"{"bg_color":[0.08,0.08,0.12,0.55],"corner_radius":12.0,"acrylic":true,"title_bar_height":32.0,"padding":12.0,"icon_size":48.0,"gap":10.0}"#;
+        let a: FenceAppearance = serde_json::from_str(old).expect("旧配置应可反序列化");
+        assert_eq!(a.style, FenceStyle::Filled);
+        assert_eq!(a.border_width, 1.0);
     }
 }

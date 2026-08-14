@@ -2,7 +2,8 @@
 //!
 //! 负责桌面 overlay 窗口与 DirectComposition / Direct2D / DirectWrite 绘制：
 //! - `device`：D3D11 + DXGI + DComp + D2D/DWrite 工厂（GPU 上下文）
-//! - `overlay`：挂在桌面壳层下的 overlay 窗口（穿透命中测试、无重定向位图）
+//! - `overlay`：挂在桌面壳层下的 overlay 窗口（`SetWindowRgn` 区域穿透、
+//!   标题拖动 / 角标缩放 / 双击打开交互）
 //! - `surface`：DComp 合成表面（每帧 BeginDraw→D2D 绘制→EndDraw→Commit）
 //! - `scene`：与应用无关的场景模型（栅栏矩形、图标、文字）
 //! - `draw`：把场景画进 D2D 目标（圆角栅栏、图标位图、文字）
@@ -28,7 +29,10 @@ pub mod theme;
 pub use compositor::Compositor;
 pub use device::RenderDevice;
 pub use draw::{draw_scene, IconStore, TextFormats};
-pub use overlay::{run_message_loop, HitRect, OverlayWindow, WM_APP_QUIT};
-pub use scene::{Scene, SceneFence, SceneIcon};
+pub use overlay::{
+    run_message_loop, ConsoleAction, ConsoleHit, FenceHit, HitModel, IconHit, OverlayEvent,
+    OverlayWindow, RectF, GRIP_SIZE, WM_APP_QUIT,
+};
+pub use scene::{ConsoleButton, ConsoleRow, Scene, SceneConsole, SceneFence, SceneIcon};
 pub use surface::{CompositionSurface, Frame};
 pub use theme::Theme;

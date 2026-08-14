@@ -2,7 +2,8 @@
 //!
 //! 缓存策略（性能约定 §7.2）：
 //! - 位图（`IconStore`）与文本格式（`TextFormats`）跨帧缓存；
-//! - 画笔/背景每帧新建——渲染目标每帧重建，画笔不能跨帧复用；
+//! - 画笔每帧新建——渲染目标每帧重建，画笔不能跨帧复用（栅栏/控制台/按钮
+//!   的填充与描边颜色来自场景，按栅栏逐一创建）；
 //! - 空闲时不绘制任何东西（0% CPU），只有内容变化才触发重绘。
 
 use std::collections::HashMap;
@@ -24,7 +25,8 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
 use fence_shell::icons::IconData;
 
-use crate::scene::{Scene, SceneFence};
+use crate::overlay::RectF;
+use crate::scene::{ConsoleButton, Scene, SceneConsole, SceneFence};
 use crate::theme::{TextStyle, Theme};
 
 /// 图标位图缓存：`bitmap_id` → 设备上的 D2D 位图。
@@ -94,9 +96,8 @@ impl TextFormats {
 }
 
 /// 单帧用画笔集合（渲染目标每帧重建，故画笔只能单帧使用）。
+/// 栅栏/控制台/按钮的填充与描边颜色来自场景，按元素在 `draw_*` 内创建。
 struct Brushes {
-    bg: ID2D1SolidColorBrush,
-    border: ID2D1SolidColorBrush,
     title: ID2D1SolidColorBrush,
     label: ID2D1SolidColorBrush,
 }
@@ -119,14 +120,15 @@ pub fn draw_scene(
     unsafe { target.Clear(Some(&clear)) };
 
     let brushes = Brushes {
-        bg: unsafe { target.CreateSolidColorBrush(&theme.fence_bg.to_d2d(), None)? },
-        border: unsafe { target.CreateSolidColorBrush(&theme.fence_border.to_d2d(), None)? },
         title: unsafe { target.CreateSolidColorBrush(&theme.title.color.to_d2d(), None)? },
         label: unsafe { target.CreateSolidColorBrush(&theme.label.color.to_d2d(), None)? },
     };
 
     for fence in &scene.fences {
         draw_fence(target, theme, fence, &brushes, icons, formats)?;
+    }
+    if let Some(console) = &scene.console {
+        draw_console(target, theme, console, &brushes, formats)?;
     }
     Ok(())
 }
@@ -149,9 +151,15 @@ fn draw_fence(
         radiusX: theme.fence_corner_radius,
         radiusY: theme.fence_corner_radius,
     };
-    unsafe {
-        target.FillRoundedRectangle(&rr, &brushes.bg);
-        target.DrawRoundedRectangle(&rr, &brushes.border, 1.0, None);
+
+    // 窗口模式：内部完全透明（仅描边）时跳过填充
+    if let Some(fill) = fence.fill_color {
+        let brush = unsafe { target.CreateSolidColorBrush(&color(fill), None)? };
+        unsafe { target.FillRoundedRectangle(&rr, &brush) };
+    }
+    if fence.border_width > 0.0 {
+        let brush = unsafe { target.CreateSolidColorBrush(&color(fence.border_color), None)? };
+        unsafe { target.DrawRoundedRectangle(&rr, &brush, fence.border_width, None) };
     }
 
     if !fence.title.is_empty() {
@@ -195,6 +203,101 @@ fn draw_fence(
     Ok(())
 }
 
+/// Sylva 控制台：深色圆角面板 + 标题 + 新建栅栏按钮 + 每栅栏一行（模式切换）。
+fn draw_console(
+    target: &ID2D1RenderTarget,
+    theme: &Theme,
+    console: &SceneConsole,
+    brushes: &Brushes,
+    formats: &TextFormats,
+) -> Result<()> {
+    let panel = D2D1_ROUNDED_RECT {
+        rect: D2D_RECT_F {
+            left: console.x,
+            top: console.y,
+            right: console.x + console.w,
+            bottom: console.y + console.h,
+        },
+        radiusX: 10.0,
+        radiusY: 10.0,
+    };
+    let bg = unsafe { target.CreateSolidColorBrush(&color([0.09, 0.11, 0.15, 0.86]), None)? };
+    let border = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.14]), None)? };
+    unsafe {
+        target.FillRoundedRectangle(&panel, &bg);
+        target.DrawRoundedRectangle(&panel, &border, 1.0, None);
+    }
+
+    let title_rect = D2D_RECT_F {
+        left: console.x + 12.0,
+        top: console.y + 8.0,
+        right: console.x + console.w - 12.0,
+        bottom: console.y + 8.0 + theme.title.size * 1.6,
+    };
+    draw_text(
+        target,
+        &console.title,
+        &formats.title,
+        title_rect,
+        &brushes.title,
+    );
+
+    draw_button(target, &console.add_btn, formats, &brushes.label)?;
+
+    for row in &console.rows {
+        draw_text(
+            target,
+            &row.label,
+            &formats.label,
+            to_d2d_rect(&row.label_rect),
+            &brushes.label,
+        );
+        draw_text(
+            target,
+            &row.mode_label,
+            &formats.label,
+            to_d2d_rect(&row.mode_rect),
+            &brushes.label,
+        );
+        draw_button(target, &row.mode_btn, formats, &brushes.label)?;
+    }
+    Ok(())
+}
+
+/// 一个按钮：圆角填充 + 细描边 + 标签文字。
+fn draw_button(
+    target: &ID2D1RenderTarget,
+    btn: &ConsoleButton,
+    formats: &TextFormats,
+    label_brush: &ID2D1SolidColorBrush,
+) -> Result<()> {
+    let rr = D2D1_ROUNDED_RECT {
+        rect: D2D_RECT_F {
+            left: btn.x,
+            top: btn.y,
+            right: btn.x + btn.w,
+            bottom: btn.y + btn.h,
+        },
+        radiusX: 6.0,
+        radiusY: 6.0,
+    };
+    let fill = unsafe { target.CreateSolidColorBrush(&color([0.25, 0.30, 0.42, 0.95]), None)? };
+    let border = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.22]), None)? };
+    unsafe {
+        target.FillRoundedRectangle(&rr, &fill);
+        target.DrawRoundedRectangle(&rr, &border, 1.0, None);
+    }
+    let font_size = unsafe { formats.label.GetFontSize() };
+    let tr = D2D_RECT_F {
+        left: btn.x + 8.0,
+        top: btn.y + (btn.h - font_size * 1.4) / 2.0,
+        right: btn.x + btn.w - 4.0,
+        bottom: btn.y + btn.h - 2.0,
+    };
+    draw_text(target, &btn.label, &formats.label, tr, label_brush);
+    Ok(())
+}
+
 fn draw_text(
     target: &ID2D1RenderTarget,
     text: &str,
@@ -212,6 +315,25 @@ fn draw_text(
             D2D1_DRAW_TEXT_OPTIONS_CLIP,
             DWRITE_MEASURING_MODE_NATURAL,
         );
+    }
+}
+
+/// [f32;4]（直通 alpha）→ D2D 颜色。
+fn color(c: [f32; 4]) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: c[0],
+        g: c[1],
+        b: c[2],
+        a: c[3],
+    }
+}
+
+fn to_d2d_rect(r: &RectF) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: r.x,
+        top: r.y,
+        right: r.x + r.w,
+        bottom: r.y + r.h,
     }
 }
 
@@ -299,5 +421,12 @@ mod tests {
                 0
             ]
         );
+    }
+
+    #[test]
+    fn color_array_maps_to_d2d() {
+        let c = color([0.2, 0.4, 0.6, 0.8]);
+        assert!((c.r - 0.2).abs() < 1e-6);
+        assert!((c.a - 0.8).abs() < 1e-6);
     }
 }

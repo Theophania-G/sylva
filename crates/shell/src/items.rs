@@ -7,16 +7,17 @@
 
 use std::path::Path;
 
-use windows::core::HRESULT;
+use windows::core::{HRESULT, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::Common::{
     ITEMIDLIST, STRRET, STRRET_CSTR, STRRET_TYPE, STRRET_WSTR,
 };
 use windows::Win32::UI::Shell::{
-    IShellFolder, SHGetDesktopFolder, SHGetPathFromIDListW, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS,
-    SHGDNF,
+    IShellFolder, SHGetDesktopFolder, SHGetPathFromIDListW, ShellExecuteW, SHCONTF_FOLDERS,
+    SHCONTF_NONFOLDERS, SHGDNF,
 };
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use fence_core::model::{ItemId, ItemKind};
 
@@ -33,6 +34,8 @@ pub struct DesktopItem {
     pub id: ItemId,
     pub display_name: String,
     pub kind: ItemKind,
+    /// 文件系统路径（虚拟项为 None），用于打开 / 拖拽等场景。
+    pub path: Option<String>,
     /// 指向该 shell 项的绝对 PIDL，供图标提取 / 拖拽等后续使用。
     pub pidl: *mut ITEMIDLIST,
 }
@@ -40,6 +43,26 @@ pub struct DesktopItem {
 impl Drop for DesktopItem {
     fn drop(&mut self) {
         unsafe { CoTaskMemFree(Some(self.pidl as *const _)) };
+    }
+}
+
+impl DesktopItem {
+    /// 用系统默认动作打开该项（等价于桌面双击）。虚拟项（无路径）跳过。
+    pub fn launch(&self) {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        let file = wide(path);
+        unsafe {
+            let _ = ShellExecuteW(
+                None, // 无父窗口
+                None, // 默认动作（open）
+                PCWSTR(file.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            );
+        }
     }
 }
 
@@ -84,12 +107,13 @@ fn build_item(desktop: &IShellFolder, pidl: *mut ITEMIDLIST) -> Option<DesktopIt
     let display_name = display_name_of(desktop, pidl)?;
     let path = path_of(pidl);
     let kind = kind_of(desktop, pidl, &display_name, path.as_deref());
-    let id = item_id(path, &display_name);
+    let id = item_id(path.clone(), &display_name);
 
     Some(DesktopItem {
         id,
         display_name,
         kind,
+        path,
         pidl,
     })
 }
@@ -193,6 +217,11 @@ fn strret_to_string(strret: &STRRET) -> String {
         // STRRET_OFFSET：无父缓冲区时无法解析
         String::new()
     }
+}
+
+/// UTF-16 编码（含结尾 NUL），供 Win32 宽字符串参数使用。
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 #[cfg(test)]
