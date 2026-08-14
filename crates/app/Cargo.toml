@@ -8,6 +8,7 @@ license.workspace = true
 fence-core = { workspace = true }
 fence-shell = { path = "../shell" }
 fence-render = { path = "../render" }
+windows = { workspace = true }
 
 crossbeam-channel = { workspace = true }
 tracing = { workspace = true }

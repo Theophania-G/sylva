@@ -50,6 +50,17 @@ impl IconStore {
         Ok(id)
     }
 
+    /// 用调用方指定的 ID 上传位图（App 层预分配稳定 ID 时用）。
+    pub fn insert_at(
+        &mut self,
+        target: &ID2D1RenderTarget,
+        id: u64,
+        data: &IconData,
+    ) -> Result<()> {
+        self.map.insert(id, make_bitmap(target, data)?);
+        Ok(())
+    }
+
     pub fn get(&self, id: u64) -> Option<&ID2D1Bitmap> {
         self.map.get(&id)
     }

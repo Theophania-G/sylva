@@ -7,6 +7,7 @@
 //! - `scene`：与应用无关的场景模型（栅栏矩形、图标、文字）
 //! - `draw`：把场景画进 D2D 目标（圆角栅栏、图标位图、文字）
 //! - `theme`：配色与尺寸（物理像素）
+//! - `compositor`：把场景呈现到 overlay 的视觉树（上传位图 + 每帧提交）
 //!
 //! 坐标约定：本层全部使用**物理像素**（虚拟屏幕坐标），逻辑坐标→物理像素
 //! 的 DPI 换算由 App 层完成。
@@ -16,6 +17,7 @@
 
 #![allow(dead_code)] // 骨架阶段；随里程碑推进逐步移除
 
+pub mod compositor;
 pub mod device;
 pub mod draw;
 pub mod overlay;
@@ -23,9 +25,10 @@ pub mod scene;
 pub mod surface;
 pub mod theme;
 
+pub use compositor::Compositor;
 pub use device::RenderDevice;
 pub use draw::{draw_scene, IconStore, TextFormats};
-pub use overlay::{run_message_loop, HitRect, OverlayWindow};
-pub use scene::Scene;
+pub use overlay::{run_message_loop, HitRect, OverlayWindow, WM_APP_QUIT};
+pub use scene::{Scene, SceneFence, SceneIcon};
 pub use surface::{CompositionSurface, Frame};
 pub use theme::Theme;

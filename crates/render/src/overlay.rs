@@ -15,14 +15,18 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM}
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, RegisterClassW, SetWindowLongPtrW,
-    ShowWindow, TranslateMessage, GWLP_USERDATA, HTCLIENT, HTTRANSPARENT, MSG, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA, WM_ERASEBKGND,
-    WM_NCHITTEST, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
+    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, PostQuitMessage, RegisterClassW,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, GWLP_USERDATA, HTCLIENT, HTTRANSPARENT, MSG,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA,
+    WM_ERASEBKGND, WM_NCHITTEST, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
 };
 
 /// 窗口类名（全局唯一，单实例）。
 const CLASS_NAME: &str = "FenceDesktopOverlay";
+
+/// 外部通知主循环退出的消息（WM_APP + 1）。
+/// 由 `run_message_loop` 的调用方决定在退出前恢复现场（如恢复真实桌面图标）。
+pub const WM_APP_QUIT: u32 = 0x8000 + 1;
 
 /// 类只注册一次（同一 HINSTANCE）。
 static CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
@@ -43,6 +47,9 @@ struct WindowState {
 /// overlay 窗口。
 pub struct OverlayWindow {
     pub hwnd: HWND,
+    /// 覆盖的虚拟屏幕尺寸（物理像素）。
+    pub width: u32,
+    pub height: u32,
     state: *mut WindowState,
 }
 
@@ -86,6 +93,8 @@ impl OverlayWindow {
 
         Ok(Self {
             hwnd,
+            width: vw as u32,
+            height: vh as u32,
             state: state_ptr,
         })
     }
@@ -169,6 +178,11 @@ unsafe extern "system" fn wnd_proc(
         }
         // DComp 接管合成，擦除由合成器完成
         WM_ERASEBKGND => LRESULT(1),
+        // 外部信号：干净退出消息循环（wnd_proc 跑在主线程，PostQuitMessage 投递到主队列）
+        WM_APP_QUIT => {
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
