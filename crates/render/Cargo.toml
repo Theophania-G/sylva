@@ -9,3 +9,4 @@ license.workspace = true
 fence-core = { workspace = true }
 fence-shell = { workspace = true }
 windows = { workspace = true }
+tracing = { workspace = true }

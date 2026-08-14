@@ -64,6 +64,8 @@ impl CompositionSurface {
         };
         let target: ID2D1RenderTarget =
             unsafe { d2d.CreateDxgiSurfaceRenderTarget(&dxgi_surface, &props)? };
+        // D2D 渲染目标必须进入 BeginDraw 状态才能绘制，否则 EndDraw 报 WRONG_STATE
+        unsafe { target.BeginDraw() };
         Ok(Frame {
             surface: &self.surface,
             target,

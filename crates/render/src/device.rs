@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::DirectComposition::{DCompositionCreateDevice, IDCompositionDevice};
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_SHARED,
+    DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_ISOLATED,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 
@@ -62,7 +62,8 @@ impl RenderDevice {
 
         let d2d: ID2D1Factory =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
-        let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        // 独立工厂：不依赖进程 MTA（我们以 STA 初始化 COM），也避免与其他进程共享
+        let dwrite: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED)? };
 
         Ok(Self {
             d2d,
@@ -86,6 +87,48 @@ mod tests {
                 let _ = (&d.d2d, &d.dwrite, &d.dcomp);
             }
             Err(_) => eprintln!("无 GPU 上下文，跳过（CI/远程环境预期行为）"),
+        }
+    }
+
+    #[test]
+    fn dwrite_text_format_creates_ok() {
+        // 定位 CreateTextFormat E_INVALIDARG：单独验证 DWrite 工厂与文本格式创建。
+        use windows::core::PCWSTR;
+        use windows::Win32::Graphics::DirectWrite::{
+            DWriteCreateFactory, DWRITE_FACTORY_TYPE_ISOLATED, DWRITE_FONT_STRETCH_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+        };
+        use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+        // 应用真实环境：STA COM；locale 必须显式（NULL 会 E_INVALIDARG）
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok();
+        }
+
+        fn wide(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+        let factory: windows::core::Result<IDWriteFactory> =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED) };
+        let factory = factory.expect("DWrite 工厂创建失败");
+        for name in ["Microsoft YaHei UI", "Segoe UI", "Arial"] {
+            let family = wide(name);
+            let locale = wide("zh-CN");
+            let r = unsafe {
+                factory.CreateTextFormat(
+                    PCWSTR(family.as_ptr()),
+                    None,
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    16.0,
+                    PCWSTR(locale.as_ptr()),
+                )
+            };
+            match r {
+                Ok(_) => eprintln!("CreateTextFormat({name}) OK"),
+                Err(e) => eprintln!("CreateTextFormat({name}) FAIL: {e:?}"),
+            }
         }
     }
 }

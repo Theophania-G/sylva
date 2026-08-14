@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use windows::core::{Result, PCWSTR};
+use windows::Win32::Globalization::GetUserDefaultLocaleName;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
@@ -84,10 +85,11 @@ pub struct TextFormats {
 
 impl TextFormats {
     pub fn new(dwrite: &IDWriteFactory, theme: &Theme) -> Result<Self> {
-        Ok(Self {
-            title: make_text_format(dwrite, theme.title)?,
-            label: make_text_format(dwrite, theme.label)?,
-        })
+        let title = make_text_format(dwrite, theme.title)?;
+        tracing::debug!("TextFormats: 标题格式就绪");
+        let label = make_text_format(dwrite, theme.label)?;
+        tracing::debug!("TextFormats: 标签格式就绪");
+        Ok(Self { title, label })
     }
 }
 
@@ -238,6 +240,8 @@ fn make_bitmap(target: &ID2D1RenderTarget, data: &IconData) -> Result<ID2D1Bitma
 
 fn make_text_format(dwrite: &IDWriteFactory, style: TextStyle) -> Result<IDWriteTextFormat> {
     let family = wide(style.font_family);
+    let locale = user_locale();
+    // localeName 传 NULL 会返回 E_INVALIDARG（实测），必须给显式 locale
     unsafe {
         dwrite.CreateTextFormat(
             PCWSTR(family.as_ptr()),
@@ -246,9 +250,21 @@ fn make_text_format(dwrite: &IDWriteFactory, style: TextStyle) -> Result<IDWrite
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
             style.size,
-            PCWSTR::null(),
+            PCWSTR(locale.as_ptr()),
         )
     }
+}
+
+/// 当前用户默认 locale（如 "zh-CN"），UTF-16 含结尾 NUL。
+fn user_locale() -> Vec<u16> {
+    // LOCALE_NAME_MAX_LENGTH = 85
+    let mut buf = [0u16; 85];
+    let n = unsafe { GetUserDefaultLocaleName(&mut buf) };
+    if n == 0 {
+        // 取不到时兜底到中英文都能渲染的常见值
+        return wide("zh-CN");
+    }
+    buf[..n as usize].to_vec() // n 含结尾 NUL，正好用作指针
 }
 
 fn wide(s: &str) -> Vec<u16> {

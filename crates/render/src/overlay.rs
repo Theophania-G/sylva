@@ -1,8 +1,9 @@
 //! overlay 窗口：挂在桌面壳层下的透明子窗口，承载 DComp 视觉树。
 //!
 //! - 覆盖整个虚拟屏幕（多显示器），位置随父窗口屏幕坐标实时计算；
-//! - `WS_EX_NOACTIVATE` 不抢焦点；`WS_EX_NOREDIRECTIONBITMAP` 走 DComp 合成
-//!   （无 GDI 重定向，消除闪烁与额外内存）；
+//! - `WS_EX_NOACTIVATE` 不抢焦点；窗口内容完全由 DComp 视觉树提供（不设置
+//!   `WS_EX_NOREDIRECTIONBITMAP`——红方向免窗口无法与 DComp target 关联，
+//!   `CreateTargetForHwnd` 会返回 `E_INVALIDARG`）；
 //! - 命中测试：栅栏矩形内 → `HTCLIENT`（可交互），其余 → `HTTRANSPARENT`
 //!   （点击穿透到桌面/壁纸）；
 //! - 窗口状态（命中矩形）保存在 `GWLP_USERDATA`，由 `OverlayWindow` 独占生命周期，
@@ -18,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, PostQuitMessage, RegisterClassW,
     SetWindowLongPtrW, ShowWindow, TranslateMessage, GWLP_USERDATA, HTCLIENT, HTTRANSPARENT, MSG,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA,
-    WM_ERASEBKGND, WM_NCHITTEST, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_POPUP,
+    WM_ERASEBKGND, WM_NCHITTEST, WNDCLASSW, WS_EX_NOACTIVATE, WS_POPUP,
 };
 
 /// 窗口类名（全局唯一，单实例）。
@@ -73,7 +74,7 @@ impl OverlayWindow {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+                WS_EX_NOACTIVATE,
                 PCWSTR(wide(CLASS_NAME).as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP,

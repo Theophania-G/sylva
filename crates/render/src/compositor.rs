@@ -38,14 +38,19 @@ impl Compositor {
         theme: Theme,
     ) -> Result<Self> {
         let target = unsafe { device.dcomp.CreateTargetForHwnd(hwnd, false)? };
+        tracing::debug!("compositor: target 绑定成功");
         let surface = CompositionSurface::new(&device.dcomp, width, height)?;
+        tracing::debug!("compositor: surface 创建成功");
         let root = unsafe { device.dcomp.CreateVisual()? };
         unsafe { root.SetContent(surface.idcomp_surface())? };
         unsafe { target.SetRoot(&root)? };
+        tracing::debug!("compositor: 视觉树挂接成功");
         // 首次提交让视觉树生效（此时表面全透明，桌面透出）
         unsafe { device.dcomp.Commit()? };
+        tracing::debug!("compositor: 首次提交成功");
 
         let formats = TextFormats::new(&device.dwrite, &theme)?;
+        tracing::debug!("compositor: 文本格式就绪");
         Ok(Self {
             device,
             surface,
@@ -63,15 +68,20 @@ impl Compositor {
     /// 一致（App 层预分配），同一 ID 重复上传会覆盖旧位图。
     pub fn present(&mut self, scene: &Scene, uploads: &[(u64, &IconData)]) -> Result<()> {
         let frame = self.surface.begin_frame(&self.device.d2d)?;
+        tracing::debug!("present: begin_frame 成功");
         {
             let target = frame.target();
             for (id, data) in uploads {
                 self.icons.insert_at(target, *id, data)?;
             }
+            tracing::debug!("present: 位图上传成功 {}", uploads.len());
             draw_scene(target, &self.theme, scene, &self.icons, &self.formats)?;
+            tracing::debug!("present: draw_scene 成功");
         }
         frame.finish()?;
+        tracing::debug!("present: finish 成功");
         unsafe { self.device.dcomp.Commit()? };
+        tracing::debug!("present: commit 成功");
         Ok(())
     }
 

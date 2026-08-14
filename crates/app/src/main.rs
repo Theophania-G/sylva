@@ -185,6 +185,26 @@ fn run(data_dir: &std::path::Path) -> fence_core::Result<()> {
         let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
     }
 
+    // 测试钩子：设置 FENCE_AUTOSTOP_MS 后到点自动干净退出（CI/自动验证用）。
+    if let Some(ms) = std::env::var("FENCE_AUTOSTOP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        let hwnd = overlay.hwnd.0 as usize; // HWND 非 Send，转 usize 跨线程
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(hwnd as *mut core::ffi::c_void)),
+                    WM_APP_QUIT,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        });
+        tracing::info!(ms, "FENCE_AUTOSTOP_MS 已设置，到点自动退出");
+    }
+
     tracing::info!("首个栅栏已呈现；Ctrl+C 退出并恢复桌面图标");
     run_message_loop();
 
