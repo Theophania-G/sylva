@@ -44,17 +44,16 @@ use windows::Win32::UI::Input::Ime::{
     ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN,
-    VK_RIGHT, VK_UP,
+    VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::Shell::{
     DragQueryFileW, FileOpenDialog, IFileOpenDialog, IShellItem, IShellItemArray,
     FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, HDROP, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow,
-    SetProcessDPIAware, TrackPopupMenu, HMENU, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    TPM_NONOTIFY, TPM_RETURNCMD,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetProcessDPIAware,
+    TrackPopupMenu, HMENU, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY,
+    TPM_RETURNCMD,
 };
 
 use sylva_core::config::ConfigStore;
@@ -274,6 +273,10 @@ enum EditTarget {
     },
     /// 便签小组件的正文（多行）。
     WidgetNotes {
+        widget: u64,
+    },
+    /// 小组件标题重命名。
+    WidgetRename {
         widget: u64,
     },
     Item {
@@ -878,6 +881,7 @@ fn is_popup_dismiss_event(ev: &OverlayEvent) -> bool {
             | OverlayEvent::WidgetMove { .. }
             | OverlayEvent::WidgetResize { .. }
             | OverlayEvent::WidgetScroll { .. }
+            | OverlayEvent::WidgetContextMenu { .. }
             // 控制台交互（点按钮/滚待办/拖动面板/热键开关）都是真实交互，编辑期间应提交。
             | OverlayEvent::ConsoleClick { .. }
             | OverlayEvent::ConsoleScroll { .. }
@@ -1152,6 +1156,28 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                 // 添加一个桌面小组件（插件实例）
                 add_widget(rt, kind);
             }
+            ConsoleZone::AddFence => {
+                // 新建一个空白栅栏并选中（位置级联，避免叠在已有栅栏上）
+                let id = rt.desk.next_fence_id();
+                let s = rt.theme.scale;
+                let n = rt.desk.fences.len();
+                let x = 80.0 * s + (n as f32 % 6.0) * 40.0 * s;
+                let y = 120.0 * s + (n as f32 % 6.0) * 40.0 * s;
+                rt.desk.fences.push(Fence {
+                    id,
+                    title: Some(format!("栅栏 {}", id)),
+                    monitor_id: 0,
+                    bounds: Rect::new(x, y, 360.0 * s, 220.0 * s),
+                    state: FenceState::Expanded,
+                    icon_ids: Vec::new(),
+                    appearance: FenceAppearance::default(),
+                    scroll: 0.0,
+                });
+                rt.selected_fence = rt.desk.fences.len() - 1;
+                if let Err(e) = rt.store.save(&rt.desk) {
+                    tracing::warn!("添加栅栏持久化失败: {e}");
+                }
+            }
         },
         OverlayEvent::ConsoleScroll { delta } => {
             // 栅栏管理页滚轮：滚动栅栏列表
@@ -1166,6 +1192,9 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
         }
         OverlayEvent::WidgetHover { widget, zone } => {
             rt.widget_hover = widget.map(|w| (w, zone));
+        }
+        OverlayEvent::WidgetContextMenu { widget, pos } => {
+            handle_widget_context_menu(rt, widget, pos);
         }
         OverlayEvent::WidgetClick { widget, zone } => {
             handle_widget_click(rt, widget, zone);
@@ -1449,12 +1478,47 @@ fn handle_widget_click(rt: &mut Runtime, widget: u64, zone: WidgetZone) {
     }
 }
 
+/// 小组件右键菜单：重命名组件 / 移出组件（与栅栏同一套桌面级管理方式）。
+fn handle_widget_context_menu(rt: &mut Runtime, widget: u64, _pos: (f32, f32)) {
+    const MENU_RENAME_WIDGET: usize = 8100;
+    const MENU_REMOVE_WIDGET: usize = 8101;
+    let menu = popup_menu();
+    if menu.is_invalid() {
+        return;
+    }
+    unsafe {
+        let s = wide("重命名组件");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_RENAME_WIDGET, PCWSTR(s.as_ptr()));
+        let s = wide("移出组件");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_REMOVE_WIDGET, PCWSTR(s.as_ptr()));
+    }
+    let (sx, sy) = cursor_screen();
+    let cmd = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY,
+            sx,
+            sy,
+            Some(0),
+            rt.hwnd,
+            None,
+        )
+        .0 as usize
+    };
+    unsafe {
+        let _ = DestroyMenu(menu);
+    }
+    match cmd {
+        MENU_RENAME_WIDGET => start_widget_rename(rt, widget),
+        MENU_REMOVE_WIDGET => close_widget(rt, widget),
+        _ => {}
+    }
+}
+
 /// 把 overlay 窗口设为前台并聚焦（内联编辑接收键盘/IME 的前提）。
 fn focus_overlay(rt: &Runtime) {
-    unsafe {
-        let _ = SetForegroundWindow(rt.hwnd);
-        let _ = SetFocus(Some(rt.hwnd));
-    }
+    // 前台交给隐藏焦点代理，overlay 本体保持 WS_EX_NOACTIVATE（不把桌面壳层提到应用之上）。
+    unsafe { (*rt.overlay_ptr).focus_for_input() };
 }
 
 /// 开始编辑待办小组件的添加输入行（D2D 内联，Enter/失焦提交）。
@@ -1506,6 +1570,35 @@ fn start_notes_edit(rt: &mut Runtime, widget: u64) {
     focus_overlay(rt);
 }
 
+/// 开始重命名小组件标题（D2D 内联，Enter/失焦提交）。
+fn start_widget_rename(rt: &mut Runtime, widget: u64) {
+    let Some(w) = rt.desk.widgets.iter().find(|w| w.id == widget) else {
+        return;
+    };
+    let s = rt.theme.scale;
+    let rect = RectF {
+        x: w.bounds.x * s + WIDGET_PAD * s,
+        y: w.bounds.y * s + (WIDGET_TITLE_H * s - 26.0 * s) / 2.0,
+        w: w.bounds.w * s - 2.0 * WIDGET_PAD * s - 40.0 * s,
+        h: 26.0 * s,
+    };
+    rt.edit = Some(InlineEdit {
+        target: EditTarget::WidgetRename { widget },
+        rect,
+        lines: vec![w.title.clone()],
+        line: 0,
+        col: 0,
+        placeholder: String::new(),
+        single_line: true,
+        focused: true,
+        composing: false,
+        comp: String::new(),
+        committing: false,
+    });
+    focus_overlay(rt);
+    position_ime_window(rt);
+}
+
 /// 内联编辑失焦/点击别处：待办输入提交（非空）、便签保存、重命名提交。
 fn dismiss_edit(rt: &mut Runtime) {
     let Some(edit) = rt.edit.take() else {
@@ -1535,6 +1628,15 @@ fn dismiss_edit(rt: &mut Runtime) {
                 w.data = WidgetData::Notes(text);
             }
             let _ = rt.store.save(&rt.desk);
+        }
+        EditTarget::WidgetRename { widget } => {
+            let text = edit.lines.join("").trim().to_string();
+            if !text.is_empty() {
+                if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
+                    w.title = text;
+                }
+                let _ = rt.store.save(&rt.desk);
+            }
         }
         EditTarget::FenceTitle { fence } => {
             let text = edit.lines.join("").trim().to_string();
@@ -1598,6 +1700,17 @@ fn commit_edit(rt: &mut Runtime) {
             }
         }
         EditTarget::WidgetNotes { .. } => {}
+        EditTarget::WidgetRename { widget } => {
+            // 小组件重命名：Enter = 提交并关闭
+            let text = text.trim().to_string();
+            rt.edit = None;
+            if !text.is_empty() {
+                if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
+                    w.title = text;
+                }
+                let _ = rt.store.save(&rt.desk);
+            }
+        }
     }
 }
 
@@ -2006,7 +2119,9 @@ fn apply_rename(rt: &mut Runtime, target: EditTarget, new_name: &str) -> bool {
         }
         EditTarget::Item { fence, icon } => commit_icon_rename(rt, fence, icon, new_name),
         // 小组件输入/便签不走改名路径（dismiss/commit 已单独处理）
-        EditTarget::WidgetTodo { .. } | EditTarget::WidgetNotes { .. } => false,
+        EditTarget::WidgetTodo { .. }
+        | EditTarget::WidgetNotes { .. }
+        | EditTarget::WidgetRename { .. } => false,
     }
 }
 
@@ -3307,6 +3422,8 @@ fn console_full_height(desk: &Desk, s: f32) -> f32 {
         + desk.fences.len().min(CONSOLE_FENCE_MAX_ROWS) as f32 * CONSOLE_FENCE_ROW_H * s
         + 8.0 * s
         + CONSOLE_FENCE_DETAIL_H * s
+        + 8.0 * s
+        + CONSOLE_ADD_BTN_H * s
         + 12.0 * s;
     widgets_h
         .max(fences_h)
@@ -3405,7 +3522,9 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
             kind_label: w.kind.label().to_string(),
         })
         .collect();
-    let add_y = content_top + 8.0 * s + 8.0 * CONSOLE_WIDGET_ROW_H * s;
+    // 添加按钮紧跟已添加列表之后（按实际数量排布，避免被面板高度裁掉）
+    let rows_shown = desk.widgets.len().min(8);
+    let add_y = content_top + 8.0 * s + rows_shown as f32 * CONSOLE_WIDGET_ROW_H * s;
     let add_todo = RectF {
         x: panel.x + CONSOLE_PAD * s,
         y: add_y,
@@ -3555,6 +3674,12 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
     } else {
         None
     };
+    let add_fence = RectF {
+        x: panel.x + CONSOLE_PAD * s,
+        y: list_top + fence_shown as f32 * row_h_f + 8.0 * s + CONSOLE_FENCE_DETAIL_H * s + 8.0 * s,
+        w: panel.w - 2.0 * CONSOLE_PAD * s,
+        h: CONSOLE_ADD_BTN_H * s,
+    };
 
     SceneConsole {
         x: panel.x,
@@ -3574,6 +3699,7 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         fence_rows,
         fence_list_view,
         fence_detail,
+        add_fence,
         fill_color: [0.062, 0.086, 0.133, 0.92],
         border_color: [1.0, 1.0, 1.0, 0.18],
         panel: anim.panel,
@@ -4144,6 +4270,7 @@ fn hit_model_from(theme: &Theme, scene: &Scene, _desk: &Desk) -> HitModel {
                     zones.push((ConsoleZone::AddWidget(WidgetKind::Notes), c.add_notes));
                 }
                 ConsoleTab::Fences => {
+                    zones.push((ConsoleZone::AddFence, c.add_fence));
                     for (i, r) in c.fence_rows.iter().enumerate() {
                         // 滚出可视区的行不参与命中（避免点到详情区时误中隐藏行）
                         if r.rect.y + r.rect.h < c.fence_list_view.y

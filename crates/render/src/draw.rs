@@ -332,7 +332,7 @@ fn draw_console(
                 None,
             )?
         };
-        draw_text(target, &t.label, &formats.label, lr, &tab_brush);
+        draw_text_centered(target, &t.label, &formats.label, lr, &tab_brush);
     }
 
     match c.active_kind {
@@ -496,7 +496,7 @@ fn draw_widget(
         bottom: w.y + WIDGET_TITLE_S * s,
     };
     let tb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.90 * a]), None)? };
-    draw_text(target, &w.title, &formats.label, title_lr, &tb);
+    draw_text_centered(target, &w.title, &formats.label, title_lr, &tb);
 
     // 关闭按钮
     let close_hover = matches!(w.hover_zone, Some(WidgetZone::Close));
@@ -1051,7 +1051,7 @@ fn draw_fences_page(
         };
         let txt =
             unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.90 * full_t]), None)? };
-        draw_text(target, &r.title, &formats.label, lr, &txt);
+        draw_text_centered(target, &r.title, &formats.label, lr, &txt);
     }
     if clip.bottom > clip.top {
         unsafe { target.PopAxisAlignedClip() };
@@ -1060,6 +1060,18 @@ fn draw_fences_page(
     if let Some(d) = &c.fence_detail {
         draw_fence_detail(target, theme, c, d, formats, full_t, accent)?;
     }
+    // 「添加栅栏」按钮
+    let add_hover = matches!(c.hover_zone, Some(ConsoleZone::AddFence));
+    draw_segmented_button(
+        target,
+        theme,
+        c.add_fence,
+        "＋ 添加栅栏",
+        false,
+        add_hover,
+        formats,
+        accent,
+    );
     Ok(())
 }
 
@@ -1323,7 +1335,7 @@ fn draw_segmented_button(
     };
     let alpha = if active { 0.96 } else { 0.80 };
     if let Ok(b) = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, alpha]), None) } {
-        draw_text(target, label, &formats.label, lr, &b);
+        draw_text_centered(target, label, &formats.label, lr, &b);
     }
 }
 
@@ -1391,7 +1403,7 @@ fn draw_fence_inner(
             right: fence.x + fence.width - theme.fence_padding,
             bottom: fence.y + theme.fence_padding + theme.title.size * 1.6,
         };
-        draw_text(target, &fence.title, &formats.title, tr, &brushes.title);
+        draw_text_centered(target, &fence.title, &formats.title, tr, &brushes.title);
     }
 
     // 内容区：悬停高亮 + 图标行 + 列表列头，全部裁剪在内容区内（滚动后顶部可裁掉）。
@@ -1780,6 +1792,26 @@ fn draw_text(
             DWRITE_MEASURING_MODE_NATURAL,
         );
     }
+}
+
+/// 居中绘制单行文本：按估算宽度把起点推到矩形中线（配合左对齐格式即可居中）。
+fn draw_text_centered(
+    target: &ID2D1RenderTarget,
+    text: &str,
+    format: &IDWriteTextFormat,
+    rect: D2D_RECT_F,
+    brush: &ID2D1SolidColorBrush,
+) {
+    let font_size = unsafe { format.GetFontSize() };
+    let max_w = (rect.right - rect.left).max(0.0);
+    let shown = truncate_to_fit(text, max_w, font_size);
+    let w = text_estimate_width(&shown, font_size);
+    let centered = D2D_RECT_F {
+        left: rect.left + ((rect.right - rect.left) - w) / 2.0,
+        right: rect.right,
+        ..rect
+    };
+    draw_text(target, &shown, format, centered, brush);
 }
 
 /// 文本在给定宽度内是否放得下（与 `truncate_to_fit` 同一估算口径，悬停判断共用）。

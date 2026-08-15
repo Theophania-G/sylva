@@ -214,6 +214,8 @@ pub struct SceneConsole {
     pub fence_list_view: RectF,
     /// 栅栏管理页：选中栅栏的详情控制区。
     pub fence_detail: Option<SceneFenceDetail>,
+    /// 栅栏管理页：「添加栅栏」按钮。
+    pub add_fence: RectF,
     pub fill_color: [f32; 4],
     pub border_color: [f32; 4],
     /// 面板展开进度 0..1（0=折叠胶囊，1=完整面板）。

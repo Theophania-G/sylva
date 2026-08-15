@@ -28,8 +28,8 @@ use windows::Win32::UI::Input::Ime::{
     IME_COMPOSITION_STRING,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
-    VK_CONTROL, VK_F10,
+    GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, MOD_ALT, MOD_CONTROL,
+    MOD_SHIFT, VK_CONTROL, VK_F10,
 };
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
@@ -37,21 +37,24 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, KillTimer, LoadCursorW, LoadIconW,
-    PostQuitMessage, RegisterClassW, SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW,
-    ShowWindow, TranslateMessage, CS_DBLCLKS, GWLP_USERDATA, HCURSOR, HICON, HTCLIENT,
-    HTTRANSPARENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
-    IDC_SIZENWSE, IDC_SIZEWE, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_SHOWNA, WM_CHAR, WM_CTLCOLOREDIT, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY,
-    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW,
-    WS_EX_APPWINDOW, WS_POPUP,
+    PostQuitMessage, RegisterClassW, SendMessageW, SetCursor, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, CS_DBLCLKS, GWLP_USERDATA, HCURSOR, HICON,
+    HTCLIENT, HTTRANSPARENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW,
+    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA, SW_SHOWNOACTIVATE, WM_CHAR, WM_CTLCOLOREDIT,
+    WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN,
+    WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use sylva_core::model::{FenceLayout, FenceStyle, WidgetKind};
 
 /// 窗口类名（全局唯一，单实例）。
 const CLASS_NAME: &str = "SylvaOverlay";
+/// 隐藏焦点代理窗口类名（独立顶层，离屏 1×1，DefWindowProc 处理即可）。
+const PROXY_CLASS: &str = "SylvaFocusProxy";
 
 /// 外部通知主循环退出的消息（WM_APP + 1）。
 /// 由 `run_message_loop` 的调用方决定在退出前恢复现场（如恢复真实桌面图标）。
@@ -93,6 +96,7 @@ pub const CLICK_DRAG_THRESHOLD: f32 = 5.0;
 
 /// 类只注册一次（同一 HINSTANCE）。
 static CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
+static PROXY_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 
 /// 矩形（虚拟屏幕坐标，物理像素）。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -148,6 +152,8 @@ pub enum ConsoleZone {
     FenceTint(Option<[f32; 3]>),
     /// 组件页：添加指定种类的小组件（在桌面上新建实例）。
     AddWidget(WidgetKind),
+    /// 栅栏管理页：「添加栅栏」按钮（新建一个空白栅栏并选中）。
+    AddFence,
 }
 
 /// 控制台（插件面板）的命中数据：整体矩形（窗口区域 + 命中判定范围）、
@@ -293,6 +299,8 @@ pub enum OverlayEvent {
         widget: Option<u64>,
         zone: Option<WidgetZone>,
     },
+    /// 桌面小组件：右键（弹上下文菜单：重命名/移出）。
+    WidgetContextMenu { widget: u64, pos: (f32, f32) },
     /// 控制台控件悬停变化（None = 移出所有控件；仅展开面板内上报）。
     ConsoleHover { zone: Option<ConsoleZone> },
     /// 控制台（插件面板）内点击某个控件。
@@ -386,6 +394,10 @@ struct WindowState {
 /// overlay 窗口。
 pub struct OverlayWindow {
     pub hwnd: HWND,
+    /// 隐藏的焦点代理窗口（独立顶层，离屏 1×1）：内联编辑需要键盘焦点，
+    /// 但 overlay 必须保持 `WS_EX_NOACTIVATE`（激活它会把桌面壳层提到应用之上）。
+    /// 聚焦代理只负责「成为前台进程」，键盘焦点仍给 overlay。
+    proxy: HWND,
     /// 窗口在虚拟屏幕上的左上角（物理像素；可含负值，如副屏在主屏左/上方时）。
     pub x: i32,
     pub y: i32,
@@ -396,6 +408,14 @@ pub struct OverlayWindow {
 }
 
 impl OverlayWindow {
+    /// 让 overlay 获得键盘输入（前台交给隐藏代理，overlay 本体不被激活/提层）。
+    pub fn focus_for_input(&self) {
+        unsafe {
+            let _ = SetForegroundWindow(self.proxy);
+            let _ = SetFocus(Some(self.hwnd));
+        }
+    }
+
     /// 在桌面壳层下创建覆盖整个虚拟屏幕的 overlay 窗口。
     pub fn create(parent: HWND) -> Result<Self> {
         let hmodule = unsafe { GetModuleHandleW(None)? };
@@ -425,10 +445,10 @@ impl OverlayWindow {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                // `WS_EX_APPWINDOW` 让程序出现在任务栏（WS_POPUP 顶层窗口默认不进任务栏）。
-                // 不再用 `WS_EX_NOACTIVATE`：内联文本编辑需要 overlay 获得键盘焦点，
-                // 点击栅栏/小组件时激活窗口、键盘输入直达 D2D 编辑（IME 正常）。
-                WS_EX_APPWINDOW,
+                // `WS_EX_NOACTIVATE`：点击栅栏/小组件不激活窗口、不把桌面壳层提到
+                // 应用之上（桌面层级永远在正常应用下面）。键盘输入走隐藏焦点代理。
+                // `WS_EX_APPWINDOW` 让程序出现在任务栏（WS_POPUP 默认不进任务栏）。
+                WS_EX_NOACTIVATE | WS_EX_APPWINDOW,
                 PCWSTR(wide(CLASS_NAME).as_ptr()),
                 // 窗口标题：任务栏按钮/悬停提示显示「Sylva」（留空会退回进程名 sylva.exe）
                 PCWSTR(wide("Sylva").as_ptr()),
@@ -489,6 +509,29 @@ impl OverlayWindow {
         };
         let _shown = unsafe { ShowWindow(hwnd, SW_SHOWNA) };
 
+        // 隐藏焦点代理：独立顶层窗口（离屏 1×1，不进任务栏），只负责让进程成为前台，
+        // 键盘焦点仍给 overlay（NOACTIVATE 本体不会因点击被激活/提层）。
+        ensure_proxy_class(hinstance);
+        let proxy = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                PCWSTR(wide(PROXY_CLASS).as_ptr()),
+                PCWSTR(wide("SylvaFocusProxy").as_ptr()),
+                WS_POPUP,
+                -32000,
+                -32000,
+                1,
+                1,
+                None,
+                None,
+                Some(hinstance),
+                None,
+            )?
+        };
+        unsafe {
+            let _ = ShowWindow(proxy, SW_SHOWNOACTIVATE);
+        }
+
         // 接受文件拖放（WM_DROPFILES）：把任意文件/文件夹/快捷方式拖进栅栏。
         // 区域裁剪不拦截拖放——系统按窗口可见区域（region）决定拖放目标，
         // 拖到栅栏并集内命中本窗口，拖到区域外仍落到桌面。
@@ -499,6 +542,7 @@ impl OverlayWindow {
 
         Ok(Self {
             hwnd,
+            proxy,
             x: vx,
             y: vy,
             width: vw as u32,
@@ -542,6 +586,7 @@ impl Drop for OverlayWindow {
             let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
         }
         let _ = unsafe { DestroyWindow(self.hwnd) };
+        let _ = unsafe { DestroyWindow(self.proxy) };
         unsafe {
             let st = Box::from_raw(self.state);
             if !st.edit_brush.0.is_null() {
@@ -593,6 +638,36 @@ fn ensure_class(hinstance: HINSTANCE) {
         let _atom = unsafe { RegisterClassW(&wc) };
         // 类重名时返回 0（唯一实例，忽略）
     });
+}
+
+/// 注册焦点代理窗口类（纯 DefWindowProc，不接收任何特殊消息）。
+fn ensure_proxy_class(hinstance: HINSTANCE) {
+    PROXY_CLASS_REGISTERED.get_or_init(|| {
+        let class_name = wide(PROXY_CLASS);
+        let wc = WNDCLASSW {
+            style: Default::default(),
+            lpfnWndProc: Some(proxy_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: hinstance,
+            hIcon: Default::default(),
+            hCursor: Default::default(),
+            hbrBackground: Default::default(),
+            lpszMenuName: PCWSTR::null(),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
+        };
+        let _atom = unsafe { RegisterClassW(&wc) };
+    });
+}
+
+/// 焦点代理窗口过程：全部消息交给默认处理（只是前台占位，不处理交互）。
+unsafe extern "system" fn proxy_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    DefWindowProcW(hwnd, msg, wparam, lparam)
 }
 
 /// 把命中模型的栅栏矩形并集设为窗口区域。区域外：
@@ -829,8 +904,22 @@ unsafe extern "system" fn wnd_proc(
             }
             let state = unsafe { &mut *ptr };
             let (mx, my) = client_point(lparam);
-            // 命中：先图标后栅栏；未命中任何交互目标时吞掉（区域内点击不穿透）。
-            if let Some(icon) = state.model.icons.iter().find(|i| i.rect.contains(mx, my)) {
+            // 命中：控制台 → 小组件 → 图标 → 栅栏；未命中任何交互目标时吞掉。
+            if let Some(c) = &state.model.console {
+                if c.rect.contains(mx, my) {
+                    return LRESULT(0);
+                }
+            }
+            if let Some(w) = state.model.widgets.iter().find(|w| w.contains(mx, my)) {
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::WidgetContextMenu {
+                        widget: w.id,
+                        pos: (mx, my),
+                    },
+                );
+            } else if let Some(icon) = state.model.icons.iter().find(|i| i.rect.contains(mx, my)) {
                 emit_event(
                     hwnd,
                     state,
