@@ -23,6 +23,10 @@ use windows::Win32::Graphics::Gdi::{
     SetWindowRgn, HBRUSH, HDC, HRGN, RGN_OR,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::Ime::{
+    ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_COMPSTR, GCS_RESULTSTR,
+    IME_COMPOSITION_STRING,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, MOD_ALT, MOD_CONTROL, MOD_SHIFT,
     VK_CONTROL, VK_F10,
@@ -37,13 +41,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindow, TranslateMessage, CS_DBLCLKS, GWLP_USERDATA, HCURSOR, HICON, HTCLIENT,
     HTTRANSPARENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
     IDC_SIZENWSE, IDC_SIZEWE, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_SHOWNA, WM_CTLCOLOREDIT, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
-    WM_RBUTTONDOWN, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW, WS_EX_APPWINDOW,
-    WS_EX_NOACTIVATE, WS_POPUP,
+    SM_YVIRTUALSCREEN, SW_SHOWNA, WM_CHAR, WM_CTLCOLOREDIT, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY,
+    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW,
+    WS_EX_APPWINDOW, WS_POPUP,
 };
 
-use sylva_core::model::{FenceLayout, FenceStyle};
+use sylva_core::model::{FenceLayout, FenceStyle, WidgetKind};
 
 /// 窗口类名（全局唯一，单实例）。
 const CLASS_NAME: &str = "SylvaOverlay";
@@ -127,16 +132,6 @@ pub struct IconHit {
 /// 控制台面板内可点击的控件。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConsoleZone {
-    /// 「添加」按钮：提交输入框文本为一条待办。
-    Add,
-    /// 勾选/取消勾选第 `index` 条待办。
-    Toggle(usize),
-    /// 删除第 `index` 条待办。
-    Delete(usize),
-    /// 「名称」输入框：聚焦文本编辑。
-    Input,
-    /// 「详细信息」输入框：聚焦详情文本编辑。
-    DetailInput,
     /// 关闭控制台面板（折叠为胶囊，不销毁）。
     Close,
     /// 点击折叠胶囊 / 空白：展开面板。
@@ -151,12 +146,8 @@ pub enum ConsoleZone {
     FenceIconSize(f32),
     FenceStyle(FenceStyle),
     FenceTint(Option<[f32; 3]>),
-    /// 插件页：切换第 `index` 个插件的启用状态。
-    PluginToggle(usize),
-    /// 插件页：「打开插件目录」。
-    OpenPluginDir,
-    /// 便签页：聚焦便签编辑框。
-    NotesEdit,
+    /// 组件页：添加指定种类的小组件（在桌面上新建实例）。
+    AddWidget(WidgetKind),
 }
 
 /// 控制台（插件面板）的命中数据：整体矩形（窗口区域 + 命中判定范围）、
@@ -171,11 +162,50 @@ pub struct ConsoleHit {
     pub zones: Vec<(ConsoleZone, RectF)>,
 }
 
+/// 桌面小组件内可点击的控件。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WidgetZone {
+    /// 标题栏（拖动移动）。
+    Title,
+    /// 关闭按钮（移除小组件）。
+    Close,
+    /// 右下角缩放把手。
+    Grip,
+    /// 勾选/取消勾选第 `index` 条待办。
+    Toggle(usize),
+    /// 删除第 `index` 条待办。
+    Delete(usize),
+    /// 添加输入行（聚焦 D2D 内联编辑）。
+    Input,
+    /// 「＋」添加按钮。
+    Add,
+    /// 便签正文区（聚焦多行编辑）。
+    Notes,
+}
+
+/// 桌面小组件的命中数据（与绘制几何同源）。
+#[derive(Debug, Clone)]
+pub struct WidgetHit {
+    /// 整个卡片矩形。
+    pub rect: RectF,
+    pub id: u64,
+    /// 控件矩形列表（先命中的生效）。
+    pub zones: Vec<(WidgetZone, RectF)>,
+}
+
+impl WidgetHit {
+    pub fn contains(&self, mx: f32, my: f32) -> bool {
+        self.rect.contains(mx, my)
+    }
+}
+
 /// 命中模型：窗口区域 + 交互命中测试的数据源。
 #[derive(Debug, Clone, Default)]
 pub struct HitModel {
     pub fences: Vec<FenceHit>,
     pub icons: Vec<IconHit>,
+    /// 桌面小组件。
+    pub widgets: Vec<WidgetHit>,
     /// 控制台面板；None = 未打开。
     pub console: Option<ConsoleHit>,
 }
@@ -245,6 +275,24 @@ pub enum OverlayEvent {
     FilesDropped { fence: usize, paths: Vec<String> },
     /// 鼠标滚轮滚动某栅栏：`delta` 是滚轮原始刻度（正=向上/远离，负=向下）。
     FenceScroll { fence: usize, delta: i32 },
+    /// 桌面小组件：点击某控件。
+    WidgetClick { widget: u64, zone: WidgetZone },
+    /// 桌面小组件：拖动标题栏移动。
+    WidgetMove { widget: u64, pos: (f32, f32) },
+    /// 桌面小组件：拖右下角缩放。
+    WidgetResize {
+        widget: u64,
+        rect: (f32, f32, f32, f32),
+    },
+    /// 桌面小组件：拖动结束（App 持久化位置/尺寸）。
+    WidgetDragEnd { widget: u64 },
+    /// 桌面小组件：滚轮滚动待办列表。
+    WidgetScroll { widget: u64, delta: i32 },
+    /// 桌面小组件：控件悬停变化。
+    WidgetHover {
+        widget: Option<u64>,
+        zone: Option<WidgetZone>,
+    },
     /// 控制台控件悬停变化（None = 移出所有控件；仅展开面板内上报）。
     ConsoleHover { zone: Option<ConsoleZone> },
     /// 控制台（插件面板）内点击某个控件。
@@ -261,6 +309,21 @@ pub enum OverlayEvent {
     ConsoleResizeEnd,
     /// 全局热键 Ctrl+Alt+T：切换控制台开关。
     ConsoleToggle,
+    /// 键盘按下（overlay 获得焦点时）：`vk` 虚拟键码，`ctrl` 是否按住 Ctrl。
+    /// 文本字符走 `Char`（经 TranslateMessage 转换）。
+    KeyDown { vk: u32, ctrl: bool },
+    /// 文本字符（非 IME 合成路径的普通输入）。
+    Char { ch: u16 },
+    /// IME 开始合成。
+    ImeStart,
+    /// IME 合成更新：`text` 为当前合成串，`caret` 为合成串内光标。
+    ImeCompose { text: String, caret: usize },
+    /// IME 合成结果上屏（最终提交的文本）。
+    ImeResult { text: String },
+    /// IME 合成结束（上屏）。
+    ImeEnd,
+    /// overlay 失去键盘焦点（内联编辑应取消聚焦但不丢文本）。
+    OverlayFocusLost,
     /// 定时器周期触发：App 检查内部库文件夹，删除的库文件对应栅栏项同步移除。
     SyncLibrary,
     /// 动画定时器触发（ANIM_TIMER，16ms）：App 推进控制台面板/待办行动画。
@@ -295,6 +358,10 @@ enum DragKind {
     ConsoleMove,
     /// 控制台右/下边缘或右下角拖动 → 缩放面板（锚定左上角）。
     ConsoleResize(ResizeZone),
+    /// 桌面小组件标题栏拖动 → 移动。
+    WidgetMove,
+    /// 桌面小组件右下角拖动 → 缩放。
+    WidgetResize,
 }
 
 struct WindowState {
@@ -304,6 +371,8 @@ struct WindowState {
     hovered: Option<(usize, Option<usize>)>,
     /// 当前悬停的控制台控件（仅在变化时上报 ConsoleHover 事件）。
     console_hovered: Option<ConsoleZone>,
+    /// 当前悬停的小组件控件（仅在变化时上报 WidgetHover 事件）。
+    widget_hovered: Option<(u64, Option<WidgetZone>)>,
     /// App 层事件处理器；返回新的命中模型以同步区域与命中数据。
     ///
     /// 返回 `None` 表示丢弃本事件、保持当前命中模型：App 在模态菜单 / 属性页等
@@ -348,6 +417,7 @@ impl OverlayWindow {
             drag: None,
             hovered: None,
             console_hovered: None,
+            widget_hovered: None,
             handler: None,
             edit_brush,
         });
@@ -355,9 +425,10 @@ impl OverlayWindow {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                // `WS_EX_NOACTIVATE` 不抢焦点；`WS_EX_APPWINDOW` 让程序出现在任务栏
-                //（WS_POPUP 顶层窗口默认不进任务栏，用户期望「正常软件应在任务栏」）。
-                WS_EX_NOACTIVATE | WS_EX_APPWINDOW,
+                // `WS_EX_APPWINDOW` 让程序出现在任务栏（WS_POPUP 顶层窗口默认不进任务栏）。
+                // 不再用 `WS_EX_NOACTIVATE`：内联文本编辑需要 overlay 获得键盘焦点，
+                // 点击栅栏/小组件时激活窗口、键盘输入直达 D2D 编辑（IME 正常）。
+                WS_EX_APPWINDOW,
                 PCWSTR(wide(CLASS_NAME).as_ptr()),
                 // 窗口标题：任务栏按钮/悬停提示显示「Sylva」（留空会退回进程名 sylva.exe）
                 PCWSTR(wide("Sylva").as_ptr()),
@@ -542,6 +613,9 @@ fn build_region(model: &HitModel) -> Option<HRGN> {
     for f in &model.fences {
         add_rect(&mut acc, f.body);
     }
+    for w in &model.widgets {
+        add_rect(&mut acc, w.rect);
+    }
     if let Some(c) = &model.console {
         add_rect(&mut acc, c.rect);
     }
@@ -662,6 +736,17 @@ unsafe extern "system" fn wnd_proc(
                         return LRESULT(0);
                     }
                 }
+                if let Some(w) = state.model.widgets.iter().find(|w| w.contains(px, py)) {
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::WidgetScroll {
+                            widget: w.id,
+                            delta,
+                        },
+                    );
+                    return LRESULT(0);
+                }
                 if let Some(f) = state.model.fences.iter().find(|f| f.body.contains(px, py)) {
                     emit_event(
                         hwnd,
@@ -719,6 +804,19 @@ unsafe extern "system" fn wnd_proc(
                 if cz != state.console_hovered {
                     state.console_hovered = cz;
                     emit_event(hwnd, state, OverlayEvent::ConsoleHover { zone: cz });
+                }
+                // 桌面小组件控件悬停（卡片内才生效）
+                let wz = state
+                    .model
+                    .widgets
+                    .iter()
+                    .find(|w| w.contains(mx, my))
+                    .map(|w| (w.id, widget_zone_at(w, mx, my)));
+                if wz != state.widget_hovered {
+                    state.widget_hovered = wz;
+                    let widget = wz.map(|(wid, _)| wid);
+                    let zone = wz.and_then(|(_, z)| z);
+                    emit_event(hwnd, state, OverlayEvent::WidgetHover { widget, zone });
                 }
             }
             on_mouse_move(hwnd, state, mx, my);
@@ -787,6 +885,81 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        // —— 内联文本编辑：键盘与 IME 直达 App（overlay 获得焦点时）——
+        WM_KEYDOWN => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::KeyDown {
+                        vk: wparam.0 as u32,
+                        ctrl: is_ctrl_down(),
+                    },
+                );
+            }
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::Char {
+                        ch: wparam.0 as u16,
+                    },
+                );
+            }
+            LRESULT(0)
+        }
+        WM_IME_STARTCOMPOSITION => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::ImeStart);
+            }
+            LRESULT(0)
+        }
+        WM_IME_COMPOSITION => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                let flags = lparam.0 as u32;
+                if flags & GCS_RESULTSTR.0 != 0 {
+                    let text = ime_string(hwnd, GCS_RESULTSTR);
+                    emit_event(hwnd, state, OverlayEvent::ImeEnd);
+                    emit_event(hwnd, state, OverlayEvent::ImeResult { text });
+                } else if flags & GCS_COMPSTR.0 != 0 {
+                    let text = ime_string(hwnd, GCS_COMPSTR);
+                    emit_event(hwnd, state, OverlayEvent::ImeCompose { text, caret: 0 });
+                }
+            }
+            LRESULT(0)
+        }
+        WM_IME_ENDCOMPOSITION => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::ImeEnd);
+            }
+            LRESULT(0)
+        }
+        WM_IME_SETCONTEXT => {
+            // 关闭系统默认合成框（文本由 D2D 内联编辑自己绘制），候选窗口仍跟随光标
+            let lp = lparam.0 & !(0x8000_0000isize);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, LPARAM(lp)) }
+        }
+        WM_KILLFOCUS => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::OverlayFocusLost);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         // 编辑框（重命名/待办输入，owner = 本窗口）绘制背景/文字色。
         // 返回暗色画刷 + 设置文字色，消除默认纯白底；底色与面板填充色一致。
         WM_CTLCOLOREDIT => {
@@ -830,6 +1003,14 @@ fn console_zone_at(c: &ConsoleHit, mx: f32, my: f32) -> Option<ConsoleZone> {
         .map(|(z, _)| *z)
 }
 
+/// 小组件内命中的控件（先匹配的生效）。
+fn widget_zone_at(w: &WidgetHit, mx: f32, my: f32) -> Option<WidgetZone> {
+    w.zones
+        .iter()
+        .find(|(_, r)| r.contains(mx, my))
+        .map(|(z, _)| *z)
+}
+
 /// 控制台面板右/下边缘与右下角的缩放区（面板锚定左上角，只缩放不位移）。
 /// 缩放区判定在标题栏移动之前，保证抓右/下边即缩放（标准窗口行为）。
 fn console_resize_zone_at(c: &ConsoleHit, mx: f32, my: f32) -> Option<ResizeZone> {
@@ -850,6 +1031,53 @@ fn console_resize_zone_at(c: &ConsoleHit, mx: f32, my: f32) -> Option<ResizeZone
 /// 按下：命中控制台控件/标题栏、边缘/角标开始缩放；命中栅栏标题栏/空白开始移动。
 /// 拖拽类动作都捕获鼠标以跟踪拖出窗口的移动。
 fn on_button_down(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
+    // 桌面小组件优先于栅栏（小组件浮于栅栏之上）：缩放/拖动/控件点击
+    if let Some(w) = state.model.widgets.iter().find(|w| w.contains(mx, my)) {
+        if let Some(zone) = widget_zone_at(w, mx, my) {
+            match zone {
+                WidgetZone::Grip => {
+                    state.drag = Some(DragState {
+                        kind: DragKind::WidgetResize,
+                        fence: w.id as usize,
+                        start: (mx, my),
+                        orig: w.rect,
+                        pressed_icon: None,
+                        ctrl: false,
+                    });
+                    unsafe {
+                        let _ = SetCursor(Some(zone_cursor(ResizeZone::BottomRight)));
+                    }
+                    unsafe { SetCapture(hwnd) };
+                    return;
+                }
+                WidgetZone::Title => {
+                    state.drag = Some(DragState {
+                        kind: DragKind::WidgetMove,
+                        fence: w.id as usize,
+                        start: (mx, my),
+                        orig: w.rect,
+                        pressed_icon: None,
+                        ctrl: false,
+                    });
+                    unsafe {
+                        let cur = LoadCursorW(None, IDC_SIZEALL).unwrap_or_default();
+                        let _ = SetCursor(Some(cur));
+                    }
+                    unsafe { SetCapture(hwnd) };
+                    return;
+                }
+                _ => {
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::WidgetClick { widget: w.id, zone },
+                    );
+                    return;
+                }
+            }
+        }
+        return; // 卡片空白：吞掉点击
+    }
     // 控制台优先：面板上的点击不落到栅栏/图标。控件（关闭/勾选/删除/添加）优先于
     // 标题栏拖动——关闭按钮就在标题栏内，先判控件才能「点 × 即关」而非开始拖动。
     if let Some(c) = &state.model.console {
@@ -1047,6 +1275,18 @@ fn zone_cursor(zone: ResizeZone) -> HCURSOR {
 /// 光标处的形状（参考 Windows 资源管理器：只有标题栏/缩放区有特殊光标）：
 /// 边缘/角 → 对应 resize 光标；标题栏 → 移动光标；图标/空白一律普通箭头。
 fn cursor_at(model: &HitModel, mx: f32, my: f32) -> HCURSOR {
+    // 桌面小组件：标题栏 = 移动，右下角 = 缩放，其余 = 箭头
+    if let Some(w) = model.widgets.iter().find(|w| w.contains(mx, my)) {
+        match widget_zone_at(w, mx, my) {
+            Some(WidgetZone::Grip) => {
+                return unsafe { LoadCursorW(None, IDC_SIZENWSE).unwrap_or_default() };
+            }
+            Some(WidgetZone::Title) => {
+                return unsafe { LoadCursorW(None, IDC_SIZEALL).unwrap_or_default() };
+            }
+            _ => return unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
+        }
+    }
     // 控制台面板：边缘/角 = resize 光标，控件/空白 = 箭头，标题栏 = 移动光标
     if let Some(c) = &model.console {
         if c.rect.contains(mx, my) {
@@ -1078,11 +1318,14 @@ fn cursor_at(model: &HitModel, mx: f32, my: f32) -> HCURSOR {
 
 /// 悬停目标：先图标后栅栏（图标优先）。未命中任何栅栏时返回 None。
 fn hover_key(model: &HitModel, mx: f32, my: f32) -> Option<(usize, Option<usize>)> {
-    // 鼠标在控制台面板上时不悬停任何栅栏/图标（面板浮于栅栏之上）
+    // 鼠标在控制台面板 / 小组件上时不悬停任何栅栏/图标（浮于栅栏之上）
     if let Some(c) = &model.console {
         if c.rect.contains(mx, my) {
             return None;
         }
+    }
+    if model.widgets.iter().any(|w| w.contains(mx, my)) {
+        return None;
     }
     for icon in &model.icons {
         if icon.rect.contains(mx, my) {
@@ -1200,6 +1443,34 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
             };
             emit_event(hwnd, state, event);
         }
+        DragKind::WidgetMove => {
+            // 目标左上角 = 按下时卡片左上角 + 鼠标位移
+            let raw_x = orig.x + (mx - drag.start.0);
+            let raw_y = orig.y + (my - drag.start.1);
+            emit_event(
+                hwnd,
+                state,
+                OverlayEvent::WidgetMove {
+                    widget: drag.fence as u64,
+                    pos: (raw_x, raw_y),
+                },
+            );
+        }
+        DragKind::WidgetResize => {
+            // 卡片锚定左上角：只调宽高（右下角跟随鼠标）
+            let (dx, dy) = (mx - drag.start.0, my - drag.start.1);
+            let mut r = orig;
+            r.w += dx;
+            r.h += dy;
+            emit_event(
+                hwnd,
+                state,
+                OverlayEvent::WidgetResize {
+                    widget: drag.fence as u64,
+                    rect: (r.x, r.y, r.w, r.h),
+                },
+            );
+        }
     }
 }
 
@@ -1250,6 +1521,15 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
         } else if let DragKind::ConsoleResize(_) = drag.kind {
             // 控制台缩放结束：App 持久化尺寸
             emit_event(hwnd, state, OverlayEvent::ConsoleResizeEnd);
+        } else if matches!(drag.kind, DragKind::WidgetMove | DragKind::WidgetResize) {
+            // 小组件拖动/缩放结束：App 持久化位置/尺寸
+            emit_event(
+                hwnd,
+                state,
+                OverlayEvent::WidgetDragEnd {
+                    widget: drag.fence as u64,
+                },
+            );
         }
         // 框选/控制台拖拽不是栅栏布局变化，不触发栅栏持久化
         if matches!(drag.kind, DragKind::Move | DragKind::Resize(_)) {
@@ -1291,6 +1571,32 @@ fn emit_event(hwnd: HWND, state: &mut WindowState, event: OverlayEvent) {
             apply_region(hwnd, &state.model);
         }
     }
+}
+
+/// 读取 IME 合成/结果字符串（GCS_COMPSTR / GCS_RESULTSTR）。
+fn ime_string(hwnd: HWND, index: IME_COMPOSITION_STRING) -> String {
+    let ctx = unsafe { ImmGetContext(hwnd) };
+    if ctx.0.is_null() {
+        return String::new();
+    }
+    let len = unsafe { ImmGetCompositionStringW(ctx, index, None, 0) };
+    let mut out = String::new();
+    if len > 0 {
+        let mut buf = vec![0u16; (len as usize) / 2];
+        unsafe {
+            ImmGetCompositionStringW(
+                ctx,
+                index,
+                Some(buf.as_mut_ptr() as *mut _ as *mut core::ffi::c_void),
+                len as u32,
+            );
+        }
+        out = String::from_utf16_lossy(&buf);
+    }
+    unsafe {
+        let _ = ImmReleaseContext(hwnd, ctx);
+    }
+    out
 }
 
 /// 鼠标消息 lParam → 客户端坐标（低/高 16 位有符号）。
@@ -1409,6 +1715,7 @@ mod tests {
                 },
             ],
             icons: vec![],
+            widgets: vec![],
             console: None,
         };
         let rgn = build_region(&model).expect("有栅栏就应有区域");

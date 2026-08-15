@@ -305,6 +305,125 @@ impl TodoItem {
     }
 }
 
+/// 桌面小组件种类（插件实例；控制中心「添加」即新建一个小组件）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WidgetKind {
+    Todo,
+    Notes,
+}
+
+impl WidgetKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            WidgetKind::Todo => "待办事项",
+            WidgetKind::Notes => "便签",
+        }
+    }
+
+    /// 小组件默认尺寸（DIP：跨 DPI 稳定，布局时 × scale 变物理像素）。
+    pub fn default_size(self) -> (f32, f32) {
+        match self {
+            WidgetKind::Todo => (240.0, 280.0),
+            WidgetKind::Notes => (240.0, 200.0),
+        }
+    }
+}
+
+/// 待办小组件数据（与旧 `desk.todos` 同构；迁移后由小组件各自持有）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetTodo {
+    pub items: Vec<TodoItem>,
+    /// 下一个待办 id（自增保证唯一）。
+    pub next_id: u64,
+}
+
+impl Default for WidgetTodo {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            next_id: 1,
+        }
+    }
+}
+
+impl WidgetTodo {
+    pub fn add(&mut self, name: String, detail: String) {
+        self.items.push(TodoItem::new(self.next_id, name, detail));
+        self.next_id = self.next_id.wrapping_add(1);
+    }
+}
+
+/// 小组件数据载荷（按种类分派）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WidgetData {
+    Todo(WidgetTodo),
+    Notes(String),
+}
+
+/// 桌面小组件实例：拖拽位置 / 缩放尺寸 / 数据全在实例内，彼此独立。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WidgetInstance {
+    pub id: u64,
+    pub kind: WidgetKind,
+    pub title: String,
+    /// 桌面位置与尺寸（DIP；与栅栏一致，跨 DPI 稳定）。
+    pub bounds: Rect,
+    pub data: WidgetData,
+}
+
+impl Default for WidgetInstance {
+    fn default() -> Self {
+        Self {
+            id: 1,
+            kind: WidgetKind::Todo,
+            title: "待办事项".into(),
+            bounds: Rect::new(0.0, 0.0, 240.0, 280.0),
+            data: WidgetData::Todo(WidgetTodo::default()),
+        }
+    }
+}
+
+impl WidgetInstance {
+    pub fn new(id: u64, kind: WidgetKind, x: f32, y: f32) -> Self {
+        let (w, h) = kind.default_size();
+        Self {
+            id,
+            kind,
+            title: kind.label().to_string(),
+            bounds: Rect::new(x, y, w, h),
+            data: match kind {
+                WidgetKind::Todo => WidgetData::Todo(WidgetTodo::default()),
+                WidgetKind::Notes => WidgetData::Notes(String::new()),
+            },
+        }
+    }
+
+    pub fn todo_mut(&mut self) -> Option<&mut WidgetTodo> {
+        match &mut self.data {
+            WidgetData::Todo(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn todo(&self) -> Option<&WidgetTodo> {
+        match &self.data {
+            WidgetData::Todo(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn notes_text(&self) -> &str {
+        match &self.data {
+            WidgetData::Notes(t) => t,
+            _ => "",
+        }
+    }
+}
+
 /// 桌面全局状态，唯一的持久化根。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Desk {
@@ -336,6 +455,10 @@ pub struct Desk {
     /// 旧配置缺失时默认含「待办事项」（保持既有行为）。
     #[serde(default = "default_plugins")]
     pub plugins: Vec<PluginEntry>,
+    /// 桌面小组件实例（待办/便签等插件实例；控制中心「添加」即新增一个）。
+    /// 旧配置无该字段时为空，启动时按旧 `todos` 迁移。
+    #[serde(default)]
+    pub widgets: Vec<WidgetInstance>,
     /// 桌面模式：false = 栅栏接管（隐藏真实图标）；true = 原始桌面（恢复真实图标、
     /// 栅栏淡出隐藏）。控制中心「切换桌面」按钮切换。
     #[serde(default)]
@@ -437,6 +560,7 @@ impl Desk {
             console_pos: None,
             console_size: None,
             plugins: default_plugins(),
+            widgets: Vec::new(),
             desktop_mode: false,
         }
     }
@@ -452,6 +576,34 @@ impl Desk {
     /// 下一个可用的栅栏 id（简单自增，稳定即可）。
     pub fn next_fence_id(&self) -> u64 {
         self.fences.iter().map(|f| f.id).max().unwrap_or(0) + 1
+    }
+
+    /// 下一个可用的小组件 id（自增）。
+    pub fn next_widget_id(&self) -> u64 {
+        self.widgets.iter().map(|w| w.id).max().unwrap_or(0) + 1
+    }
+
+    /// 旧版 `desk.todos` → 桌面小组件迁移：首次运行（无任何小组件）时，
+    /// 把旧待办迁进一个「待办事项」小组件（空列表也建一个，保证有入口可添加）。
+    pub fn migrate_widgets(&mut self) {
+        if !self.widgets.is_empty() {
+            return;
+        }
+        let id = self.next_widget_id();
+        let mut wt = WidgetTodo {
+            items: std::mem::take(&mut self.todos),
+            next_id: self.next_todo_id.max(1),
+        };
+        if wt.items.is_empty() {
+            wt.next_id = 1;
+        }
+        self.widgets.push(WidgetInstance {
+            id,
+            kind: WidgetKind::Todo,
+            title: WidgetKind::Todo.label().to_string(),
+            bounds: Rect::new(48.0, 96.0, 240.0, 280.0),
+            data: WidgetData::Todo(wt),
+        });
     }
 
     /// 查询图标的归属位置。
@@ -654,6 +806,42 @@ mod tests {
         assert_eq!(PluginKind::Todo.label(), "待办事项");
         assert_eq!(PluginKind::Notes.label(), "便签");
         assert_eq!(PluginKind::External.label(), "外部插件");
+    }
+
+    #[test]
+    fn widget_instance_defaults_and_add() {
+        let mut w = WidgetInstance::new(7, WidgetKind::Todo, 10.0, 20.0);
+        assert_eq!(w.kind, WidgetKind::Todo);
+        assert_eq!(w.bounds.w, 240.0);
+        w.todo_mut().unwrap().add("买牛奶".into(), String::new());
+        assert_eq!(w.todo().unwrap().items.len(), 1);
+        assert_eq!(w.todo().unwrap().items[0].name, "买牛奶");
+        assert_eq!(w.todo().unwrap().next_id, 2);
+    }
+
+    #[test]
+    fn widget_roundtrip() {
+        let mut w = WidgetInstance::new(3, WidgetKind::Notes, 5.0, 6.0);
+        w.data = WidgetData::Notes("备忘：周五开会".into());
+        let json = serde_json::to_string(&w).unwrap();
+        let back: WidgetInstance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.notes_text(), "备忘：周五开会");
+    }
+
+    #[test]
+    fn migrate_widgets_moves_old_todos_once() {
+        let mut d = desk();
+        d.todos
+            .push(TodoItem::new(1, "旧待办".into(), String::new()));
+        d.next_todo_id = 2;
+        d.migrate_widgets();
+        assert_eq!(d.widgets.len(), 1);
+        assert_eq!(d.widgets[0].kind, WidgetKind::Todo);
+        assert_eq!(d.widgets[0].todo().unwrap().items[0].name, "旧待办");
+        assert!(d.todos.is_empty());
+        // 再次调用不重复迁移
+        d.migrate_widgets();
+        assert_eq!(d.widgets.len(), 1);
     }
 
     #[test]

@@ -24,13 +24,19 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
-use sylva_core::model::{FenceLayout, FenceStyle};
+use sylva_core::model::{FenceLayout, FenceStyle, WidgetKind};
 use sylva_shell::icons::IconData;
-use windows_numerics::Vector2;
 
-use crate::overlay::{ConsoleZone, RectF};
-use crate::scene::{ConsoleTab, ListColumns, Scene, SceneConsole, SceneFence, SceneFenceDetail};
+use crate::overlay::{ConsoleZone, RectF, WidgetZone};
+use crate::scene::{
+    ConsoleTab, ListColumns, Scene, SceneConsole, SceneEdit, SceneFence, SceneFenceDetail,
+    SceneWidget,
+};
 use crate::theme::{TextStyle, Theme};
+
+/// 小组件内部尺寸（DIP；与 App 层 WIDGET_* 常量保持一致）。
+const WIDGET_PAD_S: f32 = 10.0;
+const WIDGET_TITLE_S: f32 = 34.0;
 
 /// 图标位图缓存：`bitmap_id` → 设备上的 D2D 位图。
 ///
@@ -143,18 +149,26 @@ pub fn draw_scene(
     for fence in &scene.fences {
         draw_fence(target, theme, fence, &brushes, icons, formats)?;
     }
+    // 桌面小组件（浮于栅栏之上）
+    for widget in &scene.widgets {
+        draw_widget(target, theme, widget, formats, 1.0)?;
+    }
     if let Some(console) = &scene.console {
         draw_console(target, theme, console, &brushes, formats)?;
+    }
+    // 内联文本编辑（最顶层，与卡片/面板同表面）
+    if let Some(edit) = &scene.edit {
+        draw_inline_edit(target, theme, edit, formats)?;
     }
     Ok(())
 }
 
-/// 控制中心：玻璃卡片，可折叠胶囊 ⇄ 展开面板（待办 / 便签 / 栅栏管理 / 插件管理）。
+/// 控制中心：玻璃卡片，可折叠胶囊 ⇄ 展开面板（组件 / 栅栏管理 两个标签页）。
 ///
 /// 面板高度已由 App 层按 `panel` 进度插值（折叠胶囊 ⇄ 完整面板）；这里按进度把
 /// 内容从「胶囊」平滑切换到「完整面板（标题 + 切换桌面 + 标签栏 + 当前页内容）」。
-/// 输入行/便签文字由独立的置顶编辑框（App 层）绘制；勾选/删除/关闭/添加/标签/
-/// 栅栏控制/插件开关的矩形与 `SceneConsole` 几何一致（命中模型复用同一份）。
+/// 各控件矩形与 `SceneConsole` 几何一致（命中模型复用同一份）；内联文本编辑由
+/// 场景级 `SceneEdit` 最后绘制（与输入框同表面，天然对齐）。
 fn draw_console(
     target: &ID2D1RenderTarget,
     theme: &Theme,
@@ -184,7 +198,7 @@ fn draw_console(
     let edge = unsafe { target.CreateSolidColorBrush(&color(c.border_color), None)? };
     unsafe { target.DrawRoundedRectangle(&panel, &edge, 1.0, None) };
 
-    // 标题「Sylva」（两种形态都显示；胶囊里居左，面板里也在标题条）
+    // 标题「Sylva」（两种形态都显示）
     let title_h = c.title_h.max(34.0 * s);
     let title_lr = D2D_RECT_F {
         left: c.x + 14.0 * s,
@@ -194,7 +208,7 @@ fn draw_console(
     };
     draw_text(target, "Sylva", &formats.title, title_lr, &brushes.title);
 
-    // 待办计数角标（两种形态都显示）
+    // 小组件计数角标（两种形态都显示）
     let badge_text = c.count.to_string();
     let badge_w = text_estimate_width(&badge_text, theme.label.size) + 14.0 * s;
     let badge_h = 19.0 * s;
@@ -322,27 +336,19 @@ fn draw_console(
     }
 
     match c.active_kind {
-        ConsoleTab::Todo => {
-            draw_todo_page(target, theme, c, formats, full_t, accent)?;
-        }
-        ConsoleTab::Notes => {
-            if let Some(n) = &c.notes {
-                draw_notes_page(target, theme, n, formats, full_t);
-            }
+        ConsoleTab::Widgets => {
+            draw_widgets_page(target, theme, c, formats, full_t, accent)?;
         }
         ConsoleTab::Fences => {
             draw_fences_page(target, theme, c, formats, full_t, accent)?;
-        }
-        ConsoleTab::Plugins => {
-            draw_plugins_page(target, theme, c, formats, full_t, accent)?;
         }
     }
     Ok(())
 }
 
-/// 待办页：输入行底框 + 添加按钮 + 事项列表（行 hover、圆形勾选、空状态、滚动条）。
+/// 组件页：已添加的小组件列表 + 「添加待办事项 / 添加便签」按钮。
 #[allow(clippy::too_many_arguments)]
-fn draw_todo_page(
+fn draw_widgets_page(
     target: &ID2D1RenderTarget,
     theme: &Theme,
     c: &SceneConsole,
@@ -351,127 +357,327 @@ fn draw_todo_page(
     accent: [f32; 4],
 ) -> Result<()> {
     let s = theme.scale;
-    // 名称输入行底框 + 详情输入行底框（文字由两个弹出编辑框绘制）
+    // 列表
+    let clip = D2D_RECT_F {
+        left: c.x + 8.0 * s,
+        top: c.y + c.title_h + c.tab_h,
+        right: c.x + c.width - 8.0 * s,
+        bottom: c.add_todo.y - 6.0 * s,
+    };
+    if clip.bottom > clip.top {
+        unsafe { target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    }
+    for r in &c.widget_rows {
+        let rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: r.rect.x,
+                top: r.rect.y,
+                right: r.rect.x + r.rect.w,
+                bottom: r.rect.y + r.rect.h,
+            },
+            radiusX: 8.0 * s,
+            radiusY: 8.0 * s,
+        };
+        let fill = [1.0, 1.0, 1.0, 0.05 * full_t];
+        let b = unsafe { target.CreateSolidColorBrush(&color(fill), None)? };
+        unsafe { target.FillRoundedRectangle(&rr, &b) };
+        let lr = D2D_RECT_F {
+            left: r.rect.x + 12.0 * s,
+            top: r.rect.y + (r.rect.h - theme.label.size * 1.6) / 2.0,
+            right: r.rect.x + r.rect.w - 90.0 * s,
+            bottom: r.rect.y + r.rect.h,
+        };
+        let tb =
+            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.88 * full_t]), None)? };
+        draw_text(target, &r.title, &formats.label, lr, &tb);
+        let klr = D2D_RECT_F {
+            left: r.rect.x + r.rect.w - 84.0 * s,
+            top: r.rect.y + (r.rect.h - theme.label.size * 1.6) / 2.0,
+            right: r.rect.x + r.rect.w - 12.0 * s,
+            bottom: r.rect.y + r.rect.h,
+        };
+        let kb =
+            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.42 * full_t]), None)? };
+        draw_text(target, &r.kind_label, &formats.detail, klr, &kb);
+    }
+    if c.widget_rows.is_empty() {
+        let empty_lr = D2D_RECT_F {
+            left: clip.left + 8.0 * s,
+            top: clip.top + 12.0 * s,
+            right: clip.right,
+            bottom: clip.top + 40.0 * s,
+        };
+        let eb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.35]), None)? };
+        draw_text(
+            target,
+            "还没有桌面组件，点下方按钮添加",
+            &formats.detail,
+            empty_lr,
+            &eb,
+        );
+    }
+    if clip.bottom > clip.top {
+        unsafe { target.PopAxisAlignedClip() };
+    }
+    // 添加按钮
+    let add_todo_hover = matches!(c.hover_zone, Some(ConsoleZone::AddWidget(WidgetKind::Todo)));
+    draw_segmented_button(
+        target,
+        theme,
+        c.add_todo,
+        "＋ 添加待办事项",
+        false,
+        add_todo_hover,
+        formats,
+        accent,
+    );
+    let add_notes_hover = matches!(
+        c.hover_zone,
+        Some(ConsoleZone::AddWidget(WidgetKind::Notes))
+    );
+    draw_segmented_button(
+        target,
+        theme,
+        c.add_notes,
+        "＋ 添加便签",
+        false,
+        add_notes_hover,
+        formats,
+        accent,
+    );
+    Ok(())
+}
+
+/// 桌面小组件卡片（待办 / 便签）：标题栏 + 内容 + 关闭/缩放把手。
+fn draw_widget(
+    target: &ID2D1RenderTarget,
+    theme: &Theme,
+    w: &SceneWidget,
+    formats: &TextFormats,
+    full_alpha: f32,
+) -> Result<()> {
+    let s = theme.scale;
+    let a = (w.alpha * full_alpha).clamp(0.0, 1.0);
+    if a <= 0.01 {
+        return Ok(());
+    }
+    let rr = D2D1_ROUNDED_RECT {
+        rect: D2D_RECT_F {
+            left: w.x,
+            top: w.y,
+            right: w.x + w.width,
+            bottom: w.y + w.height,
+        },
+        radiusX: 12.0 * s,
+        radiusY: 12.0 * s,
+    };
+    let fill = [
+        w.fill_color[0],
+        w.fill_color[1],
+        w.fill_color[2],
+        w.fill_color[3] * a,
+    ];
+    let bg = unsafe { target.CreateSolidColorBrush(&color(fill), None)? };
+    unsafe { target.FillRoundedRectangle(&rr, &bg) };
+    let edge = [
+        w.border_color[0],
+        w.border_color[1],
+        w.border_color[2],
+        w.border_color[3] * a,
+    ];
+    let eb = unsafe { target.CreateSolidColorBrush(&color(edge), None)? };
+    unsafe { target.DrawRoundedRectangle(&rr, &eb, 1.0, None) };
+
+    // 标题栏
+    let title_lr = D2D_RECT_F {
+        left: w.x + WIDGET_PAD_S * s,
+        top: w.y + (WIDGET_TITLE_S * s - theme.label.size * 1.6) / 2.0,
+        right: w.close.x - 4.0 * s,
+        bottom: w.y + WIDGET_TITLE_S * s,
+    };
+    let tb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.90 * a]), None)? };
+    draw_text(target, &w.title, &formats.label, title_lr, &tb);
+
+    // 关闭按钮
+    let close_hover = matches!(w.hover_zone, Some(WidgetZone::Close));
+    if close_hover {
+        let hov = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: w.close.x,
+                top: w.close.y,
+                right: w.close.x + w.close.w,
+                bottom: w.close.y + w.close.h,
+            },
+            radiusX: 6.0 * s,
+            radiusY: 6.0 * s,
+        };
+        let hb =
+            unsafe { target.CreateSolidColorBrush(&color([0.85, 0.28, 0.28, 0.5 * a]), None)? };
+        unsafe { target.FillRoundedRectangle(&hov, &hb) };
+    }
+    let xw = text_estimate_width("✕", theme.label.size);
+    let close_lr = D2D_RECT_F {
+        left: w.close.x + (w.close.w - xw) / 2.0,
+        top: w.close.y + (w.close.h - theme.label.size * 1.6) / 2.0,
+        right: w.close.x + w.close.w,
+        bottom: w.close.y + w.close.h,
+    };
+    let cb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.6 * a]), None)? };
+    draw_text(target, "✕", &formats.label, close_lr, &cb);
+
+    // 内容
+    match w.kind {
+        WidgetKind::Todo => {
+            draw_widget_todo(target, theme, w, formats, a)?;
+        }
+        WidgetKind::Notes => {
+            draw_widget_notes(target, theme, w, formats, a);
+        }
+    }
+
+    // 右下角缩放把手（三个小点）
+    let grip_hover = matches!(w.hover_zone, Some(WidgetZone::Grip));
+    let dot = 3.0 * s;
+    let base_x = w.grip.x + w.grip.w - 16.0 * s;
+    let base_y = w.grip.y + w.grip.h - 16.0 * s;
+    for i in 0..3 {
+        for j in 0..3 - i {
+            let cx = base_x + i as f32 * dot * 1.6;
+            let cy = base_y + j as f32 * dot * 1.6;
+            let ell = D2D1_ELLIPSE {
+                point: windows_numerics::Vector2 { X: cx, Y: cy },
+                radiusX: dot / 2.0,
+                radiusY: dot / 2.0,
+            };
+            let alpha = if grip_hover { 0.6 * a } else { 0.35 * a };
+            if let Ok(b) =
+                unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, alpha]), None) }
+            {
+                unsafe { target.FillEllipse(&ell, &b) };
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 待办小组件内容：输入行 + 「＋」按钮 + 事项列表（圆形勾选、行悬停、滚动条）。
+#[allow(clippy::too_many_arguments)]
+fn draw_widget_todo(
+    target: &ID2D1RenderTarget,
+    theme: &Theme,
+    w: &SceneWidget,
+    formats: &TextFormats,
+    a: f32,
+) -> Result<()> {
+    let s = theme.scale;
+    let accent = [0.23, 0.51, 0.96, 0.92];
+    // 输入行底框（文字由场景级内联编辑绘制；无编辑时显示占位）
     let input_rr = D2D1_ROUNDED_RECT {
         rect: D2D_RECT_F {
-            left: c.input.x,
-            top: c.input.y,
-            right: c.input.x + c.input.w,
-            bottom: c.input.y + c.input.h,
+            left: w.input.x,
+            top: w.input.y,
+            right: w.input.x + w.input.w,
+            bottom: w.input.y + w.input.h,
         },
-        radiusX: 8.0 * s,
-        radiusY: 8.0 * s,
+        radiusX: 7.0 * s,
+        radiusY: 7.0 * s,
     };
     let input_bg =
-        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.09 * full_t]), None)? };
+        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.09 * a]), None)? };
     unsafe { target.FillRoundedRectangle(&input_rr, &input_bg) };
-    let detail_rr = D2D1_ROUNDED_RECT {
-        rect: D2D_RECT_F {
-            left: c.detail_input.x,
-            top: c.detail_input.y,
-            right: c.detail_input.x + c.detail_input.w,
-            bottom: c.detail_input.y + c.detail_input.h,
-        },
-        radiusX: 8.0 * s,
-        radiusY: 8.0 * s,
-    };
-    let detail_bg =
-        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.05 * full_t]), None)? };
-    unsafe { target.FillRoundedRectangle(&detail_rr, &detail_bg) };
-
-    // 「添加」按钮（hover 提亮）
+    // 「＋」按钮
     let add_rr = D2D1_ROUNDED_RECT {
         rect: D2D_RECT_F {
-            left: c.add.x,
-            top: c.add.y,
-            right: c.add.x + c.add.w,
-            bottom: c.add.y + c.add.h,
+            left: w.add.x,
+            top: w.add.y,
+            right: w.add.x + w.add.w,
+            bottom: w.add.y + w.add.h,
         },
-        radiusX: 8.0 * s,
-        radiusY: 8.0 * s,
+        radiusX: 7.0 * s,
+        radiusY: 7.0 * s,
     };
-    let add_hover = matches!(c.hover_zone, Some(ConsoleZone::Add));
+    let add_hover = matches!(w.hover_zone, Some(WidgetZone::Add));
     let add_bg = unsafe {
         target.CreateSolidColorBrush(
             &color([
                 accent[0],
                 accent[1],
                 accent[2],
-                accent[3] * full_t * if add_hover { 1.0 } else { 0.88 },
+                accent[3] * a * if add_hover { 1.0 } else { 0.85 },
             ]),
             None,
         )?
     };
     unsafe { target.FillRoundedRectangle(&add_rr, &add_bg) };
+    let xw = text_estimate_width("＋", theme.label.size);
     let add_lr = D2D_RECT_F {
-        left: c.add.x + 4.0 * s,
-        top: c.add.y + (c.add.h - theme.label.size * 1.6) / 2.0,
-        right: c.add.x + c.add.w - 4.0 * s,
-        bottom: c.add.y + c.add.h,
+        left: w.add.x + (w.add.w - xw) / 2.0,
+        top: w.add.y + (w.add.h - theme.label.size * 1.6) / 2.0,
+        right: w.add.x + w.add.w,
+        bottom: w.add.y + w.add.h,
     };
     let add_text =
-        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.95 * full_t]), None)? };
-    draw_text(target, "添加", &formats.label, add_lr, &add_text);
+        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.95 * a]), None)? };
+    draw_text(target, "＋", &formats.label, add_lr, &add_text);
 
-    // 事项列表（裁剪在输入行之下、面板内；滚动时顶部可裁掉）
+    // 事项列表（裁剪在卡片内）
     let clip = D2D_RECT_F {
-        left: c.x + 8.0 * s,
-        top: c.todo.rows_top,
-        right: c.x + c.width - 8.0 * s,
-        bottom: c.y + c.height - 8.0 * s,
+        left: w.x + WIDGET_PAD_S * s,
+        top: w.list_top,
+        right: w.x + w.width - WIDGET_PAD_S * s,
+        bottom: w.y + w.height - 6.0 * s,
     };
     if clip.bottom > clip.top {
         unsafe { target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
     }
-    let label_h = theme.label.size * 1.6;
-    if c.todo.rows.is_empty() {
+    if w.rows.is_empty() {
         let empty_lr = D2D_RECT_F {
-            left: clip.left + 8.0 * s,
-            top: c.todo.rows_top + 10.0 * s,
+            left: clip.left + 4.0 * s,
+            top: clip.top + 8.0 * s,
             right: clip.right,
-            bottom: c.todo.rows_top + 40.0 * s,
+            bottom: clip.top + 36.0 * s,
         };
-        let empty = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.35]), None)? };
+        let eb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.32 * a]), None)? };
         draw_text(
             target,
             "暂无待办，输入后回车添加",
             &formats.detail,
             empty_lr,
-            &empty,
+            &eb,
         );
     }
-    for (i, row) in c.todo.rows.iter().enumerate() {
-        let cb = match c.checkbox.get(i) {
+    for (i, row) in w.rows.iter().enumerate() {
+        let cb = match w.checkbox.get(i) {
             Some(r) => *r,
             None => continue,
         };
-        let del = match c.del.get(i) {
+        let del = match w.del.get(i) {
             Some(r) => *r,
             None => continue,
         };
-        let a = row.alpha * full_t; // 整行透明度（入场淡入 / 幽灵淡出 × 展开进度）
+        let row_alpha = row.alpha * a;
         let dp = row.done_progress.clamp(0.0, 1.0);
         let visual_done = if row.done { dp } else { 1.0 - dp };
-        // 行 hover 背景（勾选/删除按钮同属一行）
-        let row_hover = matches!(c.hover_zone, Some(ConsoleZone::Toggle(j)) if j == i)
-            || matches!(c.hover_zone, Some(ConsoleZone::Delete(j)) if j == i);
+        let row_hover = matches!(w.hover_zone, Some(WidgetZone::Toggle(j)) if j == i)
+            || matches!(w.hover_zone, Some(WidgetZone::Delete(j)) if j == i);
         if row_hover {
-            let row_rr = D2D1_ROUNDED_RECT {
+            let hov_rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: clip.left,
-                    top: cb.y - 4.0 * s,
+                    top: cb.y - 3.0 * s,
                     right: clip.right,
-                    bottom: cb.y + cb.h + 4.0 * s,
+                    bottom: cb.y + cb.h + 3.0 * s,
                 },
                 radiusX: 6.0 * s,
                 radiusY: 6.0 * s,
             };
-            let hov =
-                unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.06 * a]), None)? };
-            unsafe { target.FillRoundedRectangle(&row_rr, &hov) };
+            let hb = unsafe {
+                target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.06 * row_alpha]), None)?
+            };
+            unsafe { target.FillRoundedRectangle(&hov_rr, &hb) };
         }
-        // 圆形勾选框：填充随进度加深，勾号过半后出现（旋转打勾由进度控制透明度）
-        let cb_ell = D2D1_ELLIPSE {
+        // 圆形勾选框
+        let ell = D2D1_ELLIPSE {
             point: windows_numerics::Vector2 {
                 X: cb.x + cb.w / 2.0,
                 Y: cb.y + cb.h / 2.0,
@@ -480,89 +686,68 @@ fn draw_todo_page(
             radiusY: cb.h / 2.0,
         };
         if visual_done > 0.0 {
-            let check_bg = unsafe {
+            let fill = unsafe {
                 target.CreateSolidColorBrush(
-                    &color([accent[0], accent[1], accent[2], accent[3] * visual_done * a]),
+                    &color([
+                        accent[0],
+                        accent[1],
+                        accent[2],
+                        accent[3] * visual_done * row_alpha,
+                    ]),
                     None,
                 )?
             };
-            unsafe { target.FillEllipse(&cb_ell, &check_bg) };
+            unsafe { target.FillEllipse(&ell, &fill) };
         }
-        let cb_edge = unsafe {
+        let edge_b = unsafe {
             target.CreateSolidColorBrush(
-                &color([1.0, 1.0, 1.0, 0.50 * (1.0 - visual_done * 0.4) * a]),
+                &color([1.0, 1.0, 1.0, 0.5 * (1.0 - visual_done * 0.4) * row_alpha]),
                 None,
             )?
         };
-        unsafe { target.DrawEllipse(&cb_ell, &cb_edge, 1.2 * s, None) };
+        unsafe { target.DrawEllipse(&ell, &edge_b, 1.2 * s, None) };
         if visual_done > 0.5 {
             let check_lr = D2D_RECT_F {
                 left: cb.x,
-                top: cb.y + (cb.h - label_h) / 2.0,
+                top: cb.y + (cb.h - theme.label.size * 1.6) / 2.0,
                 right: cb.x + cb.w,
                 bottom: cb.y + cb.h,
             };
-            let check = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, a]), None)? };
-            draw_text(target, "✓", &formats.label, check_lr, &check);
+            let cb2 =
+                unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, row_alpha]), None)? };
+            draw_text(target, "✓", &formats.label, check_lr, &cb2);
         }
-        // 事项文本：一级「名称」+ 二级「详细信息」两行（垂直居中整体块）
-        let tx = cb.x + cb.w + 8.0 * s;
-        let tw = (del.x - 8.0 * s - tx).max(1.0);
-        let name_h = theme.label.size * 1.6;
-        let detail_h = theme.label.size * 0.72 * 1.5;
-        let block_h = if row.detail.is_empty() {
-            name_h
-        } else {
-            name_h + detail_h
+        // 名称（含完成删除线）
+        let name_lr = D2D_RECT_F {
+            left: cb.x + cb.w + 8.0 * s,
+            top: cb.y + (cb.h - theme.label.size * 1.6) / 2.0,
+            right: del.x - 6.0 * s,
+            bottom: cb.y + cb.h,
         };
-        let top = cb.y + (cb.h - block_h) / 2.0;
-        let name_rr = D2D_RECT_F {
-            left: tx,
-            top,
-            right: tx + tw,
-            bottom: top + name_h,
-        };
-        let name_alpha = (0.88 - 0.46 * visual_done) * a;
-        let name_brush =
+        let name_alpha = (0.88 - 0.46 * visual_done) * row_alpha;
+        let nb =
             unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, name_alpha]), None)? };
-        draw_text(target, &row.name, &formats.label, name_rr, &name_brush);
+        draw_text(target, &row.name, &formats.label, name_lr, &nb);
         if visual_done > 0.0 {
-            let mid = top + name_h * 0.55;
+            let mid = cb.y + cb.h / 2.0;
             let line = unsafe {
-                target
-                    .CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.34 * visual_done * a]), None)?
+                target.CreateSolidColorBrush(
+                    &color([1.0, 1.0, 1.0, 0.34 * visual_done * row_alpha]),
+                    None,
+                )?
             };
-            let a2 = Vector2 {
-                X: name_rr.left,
+            let p1 = windows_numerics::Vector2 {
+                X: name_lr.left,
                 Y: mid,
             };
-            let b2 = Vector2 {
-                X: name_rr.right,
+            let p2 = windows_numerics::Vector2 {
+                X: name_lr.right,
                 Y: mid,
             };
-            unsafe { target.DrawLine(a2, b2, &line, 1.0, None) };
+            unsafe { target.DrawLine(p1, p2, &line, 1.0, None) };
         }
-        if !row.detail.is_empty() {
-            let detail_rr = D2D_RECT_F {
-                left: tx,
-                top: top + name_h,
-                right: tx + tw,
-                bottom: top + block_h,
-            };
-            let detail_alpha = (0.55 - 0.30 * visual_done) * a;
-            let detail_brush = unsafe {
-                target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, detail_alpha]), None)?
-            };
-            draw_text(
-                target,
-                &row.detail,
-                &formats.detail,
-                detail_rr,
-                &detail_brush,
-            );
-        }
-        // 删除按钮「✕」（hover 变红底）
-        let del_hover = matches!(c.hover_zone, Some(ConsoleZone::Delete(j)) if j == i);
+        // 删除按钮
+        let del_hover = matches!(w.hover_zone, Some(WidgetZone::Delete(j)) if j == i);
         if del_hover {
             let del_rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -574,44 +759,46 @@ fn draw_todo_page(
                 radiusX: 6.0 * s,
                 radiusY: 6.0 * s,
             };
-            let del_bg = unsafe {
-                target.CreateSolidColorBrush(&color([0.85, 0.28, 0.28, 0.55 * a]), None)?
+            let db = unsafe {
+                target.CreateSolidColorBrush(&color([0.85, 0.28, 0.28, 0.5 * row_alpha]), None)?
             };
-            unsafe { target.FillRoundedRectangle(&del_rr, &del_bg) };
+            unsafe { target.FillRoundedRectangle(&del_rr, &db) };
         }
         let dxw = text_estimate_width("✕", theme.label.size);
         let del_lr = D2D_RECT_F {
             left: del.x + (del.w - dxw) / 2.0,
-            top: del.y + (del.h - label_h) / 2.0,
+            top: del.y + (del.h - theme.label.size * 1.6) / 2.0,
             right: del.x + del.w,
             bottom: del.y + del.h,
         };
-        let del_brush =
-            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.42 * a]), None)? };
-        draw_text(target, "✕", &formats.label, del_lr, &del_brush);
+        let db = unsafe {
+            target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.42 * row_alpha]), None)?
+        };
+        draw_text(target, "✕", &formats.label, del_lr, &db);
     }
     if clip.bottom > clip.top {
         unsafe { target.PopAxisAlignedClip() };
     }
-    // 待办滚动条（细圆角条）
-    if c.todo.scroll_max > 0.0 {
-        let track_h = clip.bottom - c.todo.rows_top;
-        let thumb_h = (track_h * track_h / (track_h + c.todo.scroll_max))
-            .max(24.0)
+    // 滚动条
+    if w.scroll_max > 0.0 {
+        let track_h = clip.bottom - clip.top;
+        let thumb_h = (track_h * track_h / (track_h + w.scroll_max))
+            .max(20.0)
             .min(track_h);
         let max_off = (track_h - thumb_h).max(0.0);
-        let off = (c.todo.scroll / c.todo.scroll_max) * max_off;
+        let off = (w.scroll / w.scroll_max) * max_off;
         let sb = D2D1_ROUNDED_RECT {
             rect: D2D_RECT_F {
-                left: c.x + c.width - 14.0 * s,
-                top: c.todo.rows_top + off,
-                right: c.x + c.width - 10.0 * s,
-                bottom: c.todo.rows_top + off + thumb_h,
+                left: w.x + w.width - 13.0 * s,
+                top: clip.top + off,
+                right: w.x + w.width - 9.0 * s,
+                bottom: clip.top + off + thumb_h,
             },
             radiusX: 2.0,
             radiusY: 2.0,
         };
-        if let Ok(b) = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.22]), None) }
+        if let Ok(b) =
+            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.22 * a]), None) }
         {
             unsafe { target.FillRoundedRectangle(&sb, &b) };
         }
@@ -619,55 +806,182 @@ fn draw_todo_page(
     Ok(())
 }
 
-/// 便签页：圆角卡片（文字由独立的弹出多行 EDIT 承载，D2D 只画底卡 + 提示）。
-fn draw_notes_page(
+/// 便签小组件内容：正文区（内联编辑激活时由场景级编辑覆盖，未激活时显示文本 + 提示）。
+fn draw_widget_notes(
     target: &ID2D1RenderTarget,
     theme: &Theme,
-    n: &crate::scene::SceneNotes,
+    w: &SceneWidget,
     formats: &TextFormats,
-    full_t: f32,
+    a: f32,
 ) {
     let s = theme.scale;
     let rr = D2D1_ROUNDED_RECT {
         rect: D2D_RECT_F {
-            left: n.rect.x,
-            top: n.rect.y,
-            right: n.rect.x + n.rect.w,
-            bottom: n.rect.y + n.rect.h,
+            left: w.notes_rect.x,
+            top: w.notes_rect.y,
+            right: w.notes_rect.x + w.notes_rect.w,
+            bottom: w.notes_rect.y + w.notes_rect.h,
         },
-        radiusX: 10.0 * s,
-        radiusY: 10.0 * s,
+        radiusX: 8.0 * s,
+        radiusY: 8.0 * s,
     };
-    let card =
-        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.05 * full_t]), None) };
-    if let Ok(b) = card {
+    if let Ok(b) = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.05 * a]), None) }
+    {
         unsafe { target.FillRoundedRectangle(&rr, &b) };
     }
-    let card_edge =
-        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.16 * full_t]), None) };
-    if let Ok(b) = card_edge {
-        unsafe { target.DrawRoundedRectangle(&rr, &b, 1.0, None) };
-    }
-    // 卡片底部提示条（编辑框覆盖卡片主体，这行提示始终可见）
-    let hint_lr = D2D_RECT_F {
-        left: n.rect.x + 10.0 * s,
-        top: n.rect.y + n.rect.h - 22.0 * s,
-        right: n.rect.x + n.rect.w - 10.0 * s,
-        bottom: n.rect.y + n.rect.h - 6.0 * s,
-    };
-    let hint =
-        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.30 * full_t]), None) };
-    if let Ok(b) = hint {
-        draw_text(
-            target,
-            "点击编辑 · 失焦自动保存",
-            &formats.detail,
-            hint_lr,
-            &b,
-        );
+    if w.notes_text.is_empty() {
+        let hint_lr = D2D_RECT_F {
+            left: w.notes_rect.x + 10.0 * s,
+            top: w.notes_rect.y + 8.0 * s,
+            right: w.notes_rect.x + w.notes_rect.w - 10.0 * s,
+            bottom: w.notes_rect.y + 32.0 * s,
+        };
+        if let Ok(b) =
+            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.35 * a]), None) }
+        {
+            draw_text(
+                target,
+                "记点什么…（点击编辑）",
+                &formats.detail,
+                hint_lr,
+                &b,
+            );
+        }
+    } else {
+        // 简单多行预览（不换行，超出裁剪）
+        let mut y = w.notes_rect.y + 8.0 * s;
+        let line_h = theme.label.size * 1.5;
+        for line in w.notes_text.split('\n').take(8) {
+            let lr = D2D_RECT_F {
+                left: w.notes_rect.x + 10.0 * s,
+                top: y,
+                right: w.notes_rect.x + w.notes_rect.w - 10.0 * s,
+                bottom: y + line_h,
+            };
+            if let Ok(b) =
+                unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.78 * a]), None) }
+            {
+                draw_text(target, line, &formats.label, lr, &b);
+            }
+            y += line_h;
+        }
     }
 }
 
+/// 内联文本编辑渲染：输入行底 + 文本（含 IME 合成串）+ 光标 + 聚焦描边。
+/// 与卡片/面板同表面绘制，文字与圆角矩形天然对齐。
+#[allow(clippy::too_many_arguments)]
+fn draw_inline_edit(
+    target: &ID2D1RenderTarget,
+    theme: &Theme,
+    e: &SceneEdit,
+    formats: &TextFormats,
+) -> Result<()> {
+    let s = theme.scale;
+    let pad_x = 10.0 * s;
+    let font = theme.label.size;
+    let line_h = font * 1.5;
+    let rr = D2D1_ROUNDED_RECT {
+        rect: D2D_RECT_F {
+            left: e.rect.x,
+            top: e.rect.y,
+            right: e.rect.x + e.rect.w,
+            bottom: e.rect.y + e.rect.h,
+        },
+        radiusX: 7.0 * s,
+        radiusY: 7.0 * s,
+    };
+    // 底：聚焦更亮
+    let bg_alpha = if e.focused { 0.10 } else { 0.06 };
+    let bg = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, bg_alpha]), None)? };
+    unsafe { target.FillRoundedRectangle(&rr, &bg) };
+    if e.focused {
+        let edge = unsafe { target.CreateSolidColorBrush(&color([0.35, 0.62, 1.0, 0.9]), None)? };
+        unsafe { target.DrawRoundedRectangle(&rr, &edge, 1.2, None) };
+    } else {
+        let edge = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.14]), None)? };
+        unsafe { target.DrawRoundedRectangle(&rr, &edge, 1.0, None) };
+    }
+
+    // 文本裁剪区
+    let clip = D2D_RECT_F {
+        left: e.rect.x + 6.0 * s,
+        top: e.rect.y + 4.0 * s,
+        right: e.rect.x + e.rect.w - 6.0 * s,
+        bottom: e.rect.y + e.rect.h - 4.0 * s,
+    };
+    unsafe { target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+
+    let empty = e.lines.iter().all(|l| l.is_empty()) && !e.composing;
+    if empty && !e.placeholder.is_empty() {
+        // 占位提示
+        let lr = D2D_RECT_F {
+            left: e.rect.x + pad_x,
+            top: e.rect.y + (e.rect.h - font * 1.6) / 2.0,
+            right: e.rect.x + e.rect.w - pad_x,
+            bottom: e.rect.y + e.rect.h,
+        };
+        let pb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.36]), None)? };
+        draw_text(target, &e.placeholder, &formats.detail, lr, &pb);
+    } else {
+        // 逐行绘制；光标行把「光标前文本 + 合成串 + 光标后文本」拼接
+        let top0 = if e.single_line {
+            e.rect.y + (e.rect.h - font * 1.6) / 2.0
+        } else {
+            e.rect.y + pad_x / 2.0
+        };
+        for (li, line) in e.lines.iter().enumerate() {
+            let is_caret = li == e.line;
+            let text = if is_caret {
+                let before: String = line.chars().take(e.col).collect();
+                let after: String = line.chars().skip(e.col).collect();
+                format!("{before}{}{after}", e.comp)
+            } else {
+                line.clone()
+            };
+            let lr = D2D_RECT_F {
+                left: e.rect.x + pad_x,
+                top: top0 + li as f32 * line_h,
+                right: e.rect.x + e.rect.w - pad_x,
+                bottom: top0 + li as f32 * line_h + font * 1.6,
+            };
+            let tb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.92]), None)? };
+            draw_text(target, &text, &formats.label, lr, &tb);
+            // 光标
+            if e.focused && is_caret {
+                let before: String = line.chars().take(e.col).collect();
+                let before_w =
+                    text_estimate_width(&before, font) + text_estimate_width(&e.comp, font);
+                let caret_x = e.rect.x + pad_x + before_w;
+                let caret_y = if e.single_line {
+                    e.rect.y + (e.rect.h - font * 1.6) / 2.0
+                } else {
+                    top0 + li as f32 * line_h
+                };
+                let blink_on = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() / 500 % 2 == 0)
+                    .unwrap_or(true);
+                if blink_on {
+                    let cb = unsafe {
+                        target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.95]), None)?
+                    };
+                    let p1 = windows_numerics::Vector2 {
+                        X: caret_x,
+                        Y: caret_y,
+                    };
+                    let p2 = windows_numerics::Vector2 {
+                        X: caret_x,
+                        Y: caret_y + font * 1.4,
+                    };
+                    unsafe { target.DrawLine(p1, p2, &cb, 1.4, None) };
+                }
+            }
+        }
+    }
+    unsafe { target.PopAxisAlignedClip() };
+    Ok(())
+}
 /// 栅栏管理页：可点选栅栏列表 + 选中栅栏的详情控制区。
 #[allow(clippy::too_many_arguments)]
 fn draw_fences_page(
@@ -1013,136 +1327,6 @@ fn draw_segmented_button(
     }
 }
 
-/// 插件页：插件行（名称/描述/版本 + 启用开关）+ 打开插件目录按钮。
-#[allow(clippy::too_many_arguments)]
-fn draw_plugins_page(
-    target: &ID2D1RenderTarget,
-    theme: &Theme,
-    c: &SceneConsole,
-    formats: &TextFormats,
-    full_t: f32,
-    accent: [f32; 4],
-) -> Result<()> {
-    let s = theme.scale;
-    let clip = D2D_RECT_F {
-        left: c.x + 8.0 * s,
-        top: c.y + c.title_h + c.tab_h,
-        right: c.x + c.width - 8.0 * s,
-        bottom: c.open_plugins.y - 4.0 * s,
-    };
-    if clip.bottom > clip.top {
-        unsafe { target.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-    }
-    for (i, p) in c.plugin_rows.iter().enumerate() {
-        let hover = matches!(c.hover_zone, Some(ConsoleZone::PluginToggle(j)) if j == i);
-        let rr = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: p.rect.x,
-                top: p.rect.y,
-                right: p.rect.x + p.rect.w,
-                bottom: p.rect.y + p.rect.h,
-            },
-            radiusX: 8.0 * s,
-            radiusY: 8.0 * s,
-        };
-        if hover {
-            let hb = unsafe {
-                target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.07 * full_t]), None)?
-            };
-            unsafe { target.FillRoundedRectangle(&rr, &hb) };
-        }
-        // 名称 + 版本
-        let name_lr = D2D_RECT_F {
-            left: p.rect.x + 12.0 * s,
-            top: p.rect.y + 6.0 * s,
-            right: p.toggle.x - 8.0 * s,
-            bottom: p.rect.y + 24.0 * s,
-        };
-        let nb =
-            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.90 * full_t]), None)? };
-        draw_text(target, &p.name, &formats.label, name_lr, &nb);
-        let ver_w = text_estimate_width(&p.version, theme.label.size) + 6.0 * s;
-        let ver_lr = D2D_RECT_F {
-            left: name_lr.right - ver_w,
-            top: p.rect.y + 6.0 * s,
-            right: name_lr.right,
-            bottom: p.rect.y + 24.0 * s,
-        };
-        let vb =
-            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.38 * full_t]), None)? };
-        draw_text(target, &p.version, &formats.detail, ver_lr, &vb);
-        // 描述
-        let desc_lr = D2D_RECT_F {
-            left: p.rect.x + 12.0 * s,
-            top: p.rect.y + 24.0 * s,
-            right: p.toggle.x - 8.0 * s,
-            bottom: p.rect.y + p.rect.h - 4.0 * s,
-        };
-        let db =
-            unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.48 * full_t]), None)? };
-        draw_text(target, &p.desc, &formats.detail, desc_lr, &db);
-        // 启用开关（胶囊 + 滑块）
-        draw_toggle_switch(target, p.toggle, p.enabled, accent);
-    }
-    if clip.bottom > clip.top {
-        unsafe { target.PopAxisAlignedClip() };
-    }
-    // 打开插件目录按钮
-    let open_hover = matches!(c.hover_zone, Some(ConsoleZone::OpenPluginDir));
-    draw_segmented_button(
-        target,
-        theme,
-        c.open_plugins,
-        "打开插件目录（可放入 plugin.json 自由增添）",
-        false,
-        open_hover,
-        formats,
-        accent,
-    );
-    Ok(())
-}
-
-/// 启用开关：圆角胶囊 + 圆形滑块；开 = 强调色，关 = 灰。
-fn draw_toggle_switch(target: &ID2D1RenderTarget, rect: RectF, on: bool, accent: [f32; 4]) {
-    let rr = D2D1_ROUNDED_RECT {
-        rect: D2D_RECT_F {
-            left: rect.x,
-            top: rect.y,
-            right: rect.x + rect.w,
-            bottom: rect.y + rect.h,
-        },
-        radiusX: rect.h / 2.0,
-        radiusY: rect.h / 2.0,
-    };
-    let fill = if on {
-        [accent[0], accent[1], accent[2], 0.95]
-    } else {
-        [1.0, 1.0, 1.0, 0.18]
-    };
-    if let Ok(b) = unsafe { target.CreateSolidColorBrush(&color(fill), None) } {
-        unsafe { target.FillRoundedRectangle(&rr, &b) };
-    }
-    let r = rect.h / 2.0 - 2.0;
-    let knob_x = if on {
-        rect.x + rect.w - rect.h / 2.0
-    } else {
-        rect.x + rect.h / 2.0
-    };
-    let ell = D2D1_ELLIPSE {
-        point: windows_numerics::Vector2 {
-            X: knob_x,
-            Y: rect.y + rect.h / 2.0,
-        },
-        radiusX: r,
-        radiusY: r,
-    };
-    if let Ok(b) = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 1.0]), None) } {
-        unsafe { target.FillEllipse(&ell, &b) };
-    }
-}
-
-/// 栅栏绘制入口：透明度 < 1（桌面切换淡出/淡入）时用 D2D 图层整体淡化，
-/// 包括背景、描边、文字与图标位图，避免「背景已透明但图标悬空」的割裂感。
 fn draw_fence(
     target: &ID2D1RenderTarget,
     theme: &Theme,

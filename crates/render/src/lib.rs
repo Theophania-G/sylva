@@ -31,11 +31,12 @@ pub use device::RenderDevice;
 pub use draw::{draw_scene, IconStore, TextFormats};
 pub use overlay::{
     run_message_loop, ConsoleHit, ConsoleZone, FenceHit, HitModel, IconHit, OverlayEvent,
-    OverlayWindow, RectF, ResizeZone, GRIP_SIZE, WM_APP_QUIT, WM_SYLVA_INJECT,
+    OverlayWindow, RectF, ResizeZone, WidgetHit, WidgetZone, GRIP_SIZE, WM_APP_QUIT,
+    WM_SYLVA_INJECT,
 };
 pub use scene::{
-    ConsoleTab, ListColumns, Scene, SceneConsole, SceneFence, SceneFenceDetail, SceneFenceRow,
-    SceneIcon, SceneNotes, ScenePluginRow, SceneTab, SceneTodo, SceneTodoRow,
+    ConsoleTab, ListColumns, Scene, SceneConsole, SceneEdit, SceneFence, SceneFenceDetail,
+    SceneFenceRow, SceneIcon, SceneTab, SceneTodo, SceneTodoRow, SceneWidget, SceneWidgetRow,
 };
 pub use surface::{CompositionSurface, Frame};
 pub use theme::Theme;
