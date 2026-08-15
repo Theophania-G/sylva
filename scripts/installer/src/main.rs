@@ -2,8 +2,12 @@
 //! 免管理员权限：装到 %LOCALAPPDATA%\Programs\Sylva，建桌面/开始菜单快捷方式，
 //! 注册开机自启与控制面板卸载项，安装完成后自动启动。
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::env;
 use std::fs;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -34,9 +38,13 @@ const ID_BTN_QUIT: usize = 1002;
 const ID_PROGRESS: usize = 1003;
 const ID_STATUS: usize = 1004;
 
-const DARK_BG: COLORREF = COLORREF(0x00_1E_16_14); // RGB(20,22,30)
-const LIGHT_TEXT: COLORREF = COLORREF(0x00_FA_F2_EE); // RGB(238,242,250)
+/// 安装面板白底黑字
+const PANEL_BG: COLORREF = COLORREF(0x00_FF_FF_FF); // 白
+const TEXT_FG: COLORREF = COLORREF(0x00_00_00_00); // 黑
 const ACCENT: COLORREF = COLORREF(0x00_F6_82_3B); // RGB(59,130,246)
+
+/// 子进程不弹出控制台窗口（CREATE_NO_WINDOW）
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct Installer {
     hwnd: HWND,
@@ -91,6 +99,7 @@ fn set_progress(app: &Installer, percent: u32) {
 fn reg_add(key: &str, value: &str, data: &str) {
     let _ = Command::new("reg")
         .args(["add", key, "/v", value, "/t", "REG_SZ", "/d", data, "/f"])
+        .creation_flags(CREATE_NO_WINDOW)
         .status();
 }
 
@@ -137,6 +146,7 @@ fn run_install(app: &Installer) -> bool {
             "-EncodedCommand",
             &encoded,
         ])
+        .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -177,7 +187,9 @@ fn run_install(app: &Installer) -> bool {
     set_progress(app, 95);
 
     // 启动
-    let _ = Command::new(&dest.join("sylva.exe")).spawn();
+    let _ = Command::new(&dest.join("sylva.exe"))
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
     set_status(app, "安装完成，Sylva 已启动。");
     set_progress(app, 100);
     true
@@ -241,8 +253,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             if app_ptr != 0 {
                 let app = &*(app_ptr as *const Installer);
                 let hdc = HDC(lparam.0 as *mut core::ffi::c_void);
-                let _ = SetTextColor(hdc, LIGHT_TEXT);
-                let _ = SetBkColor(hdc, DARK_BG);
+                let _ = SetTextColor(hdc, TEXT_FG);
+                let _ = SetBkColor(hdc, PANEL_BG);
                 return LRESULT(app.brush.0 as isize);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
@@ -280,7 +292,7 @@ fn main() {
         hInstance: hinstance,
         hIcon: app_icon(hinstance),
         hCursor: Default::default(),
-        hbrBackground: unsafe { CreateSolidBrush(DARK_BG) },
+        hbrBackground: unsafe { CreateSolidBrush(PANEL_BG) },
         lpszMenuName: PCWSTR::null(),
         lpszClassName: class_name,
     };
@@ -294,8 +306,8 @@ fn main() {
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             0,
             0,
-            480,
-            320,
+            560,
+            400,
             None,
             None,
             Some(hinstance),
@@ -320,8 +332,8 @@ fn main() {
         let _ = SetWindowPos(
             hwnd,
             None,
-            (scr - 480) / 2,
-            (scy - 320) / 2,
+            (scr - 560) / 2,
+            (scy - 400) / 2,
             0,
             0,
             SWP_NOSIZE | SWP_NOZORDER,
@@ -330,7 +342,7 @@ fn main() {
 
     // 标题字体
     let mut lf: LOGFONTW = unsafe { std::mem::zeroed() };
-    lf.lfHeight = -22;
+    lf.lfHeight = -26;
     lf.lfWeight = 600;
     lf.lfCharSet = FONT_CHARSET(1);
     lf.lfOutPrecision = FONT_OUTPUT_PRECISION(0);
@@ -341,7 +353,7 @@ fn main() {
         lf.lfFaceName[i] = *c;
     }
     let font_title = unsafe { CreateFontIndirectW(&lf) };
-    let brush = unsafe { CreateSolidBrush(DARK_BG) };
+    let brush = unsafe { CreateSolidBrush(PANEL_BG) };
 
     let mut app = Installer {
         hwnd,
@@ -376,29 +388,29 @@ fn main() {
     let title = mk(
         &wide("STATIC"),
         &wide("Sylva 桌面栅栏整理器"),
-        24,
-        18,
-        432,
-        34,
+        28,
+        28,
+        504,
+        40,
         WS_CHILD | WS_VISIBLE,
         IDC_STATIC as usize,
     );
     mk(
         &wide("STATIC"),
         &wide("将安装到 %LOCALAPPDATA%\\Programs\\Sylva，并创建桌面快捷方式。"),
+        28,
+        84,
+        504,
         24,
-        62,
-        432,
-        22,
         WS_CHILD | WS_VISIBLE,
         IDC_STATIC as usize,
     );
     mk(
         &wide("STATIC"),
         &wide("版本 0.1.0 · Windows 10/11 · 免管理员权限"),
-        24,
-        90,
-        432,
+        28,
+        116,
+        504,
         20,
         WS_CHILD | WS_VISIBLE,
         IDC_STATIC as usize,
@@ -414,19 +426,19 @@ fn main() {
     app.hprogress = mk(
         &wide("msctls_progress32"),
         &wide(""),
+        28,
+        180,
+        504,
         24,
-        140,
-        432,
-        22,
         WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | PBS_SMOOTH),
         ID_PROGRESS,
     );
     app.hstatus = mk(
         &wide("STATIC"),
         &wide("准备就绪"),
-        24,
-        172,
-        432,
+        28,
+        216,
+        504,
         20,
         WS_CHILD | WS_VISIBLE,
         ID_STATUS,
@@ -434,20 +446,20 @@ fn main() {
     app.hbtn_install = mk(
         &wide("BUTTON"),
         &wide("安装"),
-        150,
-        220,
-        80,
-        32,
+        180,
+        300,
+        90,
+        34,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         ID_BTN_INSTALL,
     );
     mk(
         &wide("BUTTON"),
         &wide("退出"),
-        248,
-        220,
-        80,
-        32,
+        290,
+        300,
+        90,
+        34,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP,
         ID_BTN_QUIT,
     );
