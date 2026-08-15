@@ -208,39 +208,6 @@ fn draw_console(
     };
     draw_text(target, "Sylva", &formats.title, title_lr, &brushes.title);
 
-    // 小组件计数角标（两种形态都显示）
-    let badge_text = c.count.to_string();
-    let badge_w = text_estimate_width(&badge_text, theme.label.size) + 14.0 * s;
-    let badge_h = 19.0 * s;
-    let badge_x = c.x + 14.0 * s + text_estimate_width("Sylva", theme.title.size) + 9.0 * s;
-    let badge_rr = D2D1_ROUNDED_RECT {
-        rect: D2D_RECT_F {
-            left: badge_x,
-            top: c.y + (title_h - badge_h) / 2.0,
-            right: badge_x + badge_w,
-            bottom: c.y + (title_h - badge_h) / 2.0 + badge_h,
-        },
-        radiusX: badge_h / 2.0,
-        radiusY: badge_h / 2.0,
-    };
-    let badge_bg = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.10]), None)? };
-    unsafe { target.FillRoundedRectangle(&badge_rr, &badge_bg) };
-    let badge_lr = D2D_RECT_F {
-        left: badge_x,
-        top: c.y + (title_h - theme.label.size * 1.6) / 2.0,
-        right: badge_x + badge_w,
-        bottom: c.y + title_h,
-    };
-    let badge_text_brush =
-        unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.72]), None)? };
-    draw_text(
-        target,
-        &badge_text,
-        &formats.label,
-        badge_lr,
-        &badge_text_brush,
-    );
-
     // 折叠胶囊：右下角展开提示「⌄」
     if pill_t > 0.0 {
         let hint_lr = D2D_RECT_F {
@@ -1102,12 +1069,28 @@ fn draw_fence_detail(
     let label_lr = D2D_RECT_F {
         left: d.rect.x + 2.0 * s,
         top: d.rect.y + 2.0 * s,
-        right: d.rect.x + d.rect.w - 2.0 * s,
+        right: d.remove_btn.x - 6.0 * s,
         bottom: d.rect.y + 20.0 * s,
     };
     let title =
         unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.75 * full_t]), None)? };
     draw_text(target, &d.title, &formats.label, label_lr, &title);
+    // 「移出栅栏」按钮（hover 变红）
+    let remove_hover = matches!(c.hover_zone, Some(ConsoleZone::RemoveFence));
+    draw_segmented_button(
+        target,
+        theme,
+        d.remove_btn,
+        "移出",
+        false,
+        remove_hover,
+        formats,
+        if remove_hover {
+            [0.85, 0.28, 0.28, 0.9]
+        } else {
+            accent
+        },
+    );
 
     let label_x = d.rect.x + 2.0 * s;
     let label_w = 40.0 * s;

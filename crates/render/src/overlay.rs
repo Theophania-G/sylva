@@ -33,7 +33,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_SHIFT, VK_CONTROL, VK_F10,
 };
 use windows::Win32::UI::Shell::{
-    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, HDROP,
+    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, Shell_NotifyIconW, HDROP,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
@@ -46,8 +47,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNOACTIVATE, WM_CHAR, WM_CTLCOLOREDIT, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY,
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION,
     WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_SETCURSOR, WM_SETICON, WM_TIMER, WNDCLASSW,
-    WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_TIMER,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use sylva_core::model::{FenceLayout, FenceStyle, WidgetKind};
@@ -65,6 +66,12 @@ pub const WM_APP_QUIT: u32 = 0x8000 + 1;
 /// `Box<OverlayEvent>`（发送方 `Box::into_raw`，接收方 `Box::from_raw` 释放）。
 /// 用途：就地重命名提交后，绕过鼠标消息直接触发一次完整重绘 + 命中模型重建。
 pub const WM_SYLVA_INJECT: u32 = 0x8000 + 2;
+
+/// 托盘图标回调消息（WM_APP + 3）：`lParam` 为托盘鼠标消息（WM_RBUTTONUP 等）。
+pub const WM_TRAY: u32 = 0x8000 + 3;
+
+/// 托盘图标 ID（进程内唯一）。
+const TRAY_ID: u32 = 1;
 
 /// 全局退出热键：Ctrl+Shift+F10。GUI 版没有控制台，Ctrl+C 不可用，
 /// 必须有一个干净退出的入口（否则只能杀进程，桌面图标无法恢复）。
@@ -155,6 +162,8 @@ pub enum ConsoleZone {
     AddWidget(WidgetKind),
     /// 栅栏管理页：「添加栅栏」按钮（新建一个空白栅栏并选中）。
     AddFence,
+    /// 栅栏管理页：移出当前选中的栅栏。
+    RemoveFence,
 }
 
 /// 控制台（插件面板）的命中数据：整体矩形（窗口区域 + 命中判定范围）、
@@ -302,6 +311,10 @@ pub enum OverlayEvent {
     },
     /// 桌面小组件：右键（弹上下文菜单：重命名/移出）。
     WidgetContextMenu { widget: u64, pos: (f32, f32) },
+    /// 托盘图标：右键（显示控制中心/退出菜单）。
+    TrayMenu,
+    /// 托盘图标：双击（切换控制中心开合）。
+    TrayToggle,
     /// 控制台控件悬停变化（None = 移出所有控件；仅展开面板内上报）。
     ConsoleHover { zone: Option<ConsoleZone> },
     /// 控制台（插件面板）内点击某个控件。
@@ -458,8 +471,9 @@ impl OverlayWindow {
             CreateWindowExW(
                 // `WS_EX_NOACTIVATE`：点击栅栏/小组件不激活窗口、不把桌面壳层提到
                 // 应用之上（桌面层级永远在正常应用下面）。键盘输入走隐藏焦点代理。
-                // `WS_EX_APPWINDOW` 让程序出现在任务栏（WS_POPUP 默认不进任务栏）。
-                WS_EX_NOACTIVATE | WS_EX_APPWINDOW,
+                // `WS_EX_TOOLWINDOW`：不进任务栏/Alt+Tab——日常入口是托盘图标
+                // （默认折叠在通知区隐藏图标里），右键托盘即「Sylva 控制中心」。
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 PCWSTR(wide(CLASS_NAME).as_ptr()),
                 // 窗口标题：任务栏按钮/悬停提示显示「Sylva」（留空会退回进程名 sylva.exe）
                 PCWSTR(wide("Sylva").as_ptr()),
@@ -494,6 +508,21 @@ impl OverlayWindow {
                 Some(LPARAM(hicon.0 as isize)),
             );
         }
+
+        // 托盘图标（通知区，默认折叠在「隐藏的图标」里）：右键 = 控制中心菜单，
+        // 双击 = 切换控制中心开合。日常入口不再占任务栏按钮。
+        let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = TRAY_ID;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uCallbackMessage = WM_TRAY;
+        nid.hIcon = hicon;
+        let tip = wide("Sylva 桌面栅栏");
+        for (i, c) in tip.iter().take(127).enumerate() {
+            nid.szTip[i] = *c;
+        }
+        let _ = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
 
         // 立即用一个空区域：首个栅栏命中模型到来之前，整个窗口对鼠标不可见，
         // 不会出现「全屏死区」。首个模型到达后区域会被替换为栅栏并集。
@@ -598,6 +627,12 @@ impl Drop for OverlayWindow {
         }
         let _ = unsafe { DestroyWindow(self.hwnd) };
         let _ = unsafe { DestroyWindow(self.proxy) };
+        // 移除托盘图标
+        let mut nid: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = self.hwnd;
+        nid.uID = TRAY_ID;
+        let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) };
         unsafe {
             let st = Box::from_raw(self.state);
             if !st.edit_brush.0.is_null() {
@@ -964,6 +999,23 @@ unsafe extern "system" fn wnd_proc(
             if !ptr.is_null() {
                 let state = unsafe { &mut *ptr };
                 emit_event(hwnd, state, OverlayEvent::ConsoleToggle);
+            }
+            LRESULT(0)
+        }
+        // 托盘图标回调：右键 → 控制中心菜单；双击 → 切换控制中心开合
+        WM_TRAY if lparam.0 as u32 == WM_RBUTTONUP => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::TrayMenu);
+            }
+            LRESULT(0)
+        }
+        WM_TRAY if lparam.0 as u32 == WM_LBUTTONDBLCLK => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::TrayToggle);
             }
             LRESULT(0)
         }

@@ -169,6 +169,8 @@ pub struct SceneFenceDetail {
     /// 色调：默认（恢复玻璃底色）+ 预设色板（与 App 层 TINT_PRESETS 平行）。
     pub tint_default: RectF,
     pub tints: Vec<RectF>,
+    /// 「移出栅栏」按钮（详情卡右上角）。
+    pub remove_btn: RectF,
 }
 
 /// 组件页：一行（小组件名称 + 种类）。

@@ -853,15 +853,45 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL {
     BOOL(1) // 已处理，阻止默认终止行为（让主循环干净退出）
 }
 
-/// 除 `skip` 外其它栅栏的当前边界（碰撞/吸附的锚点集合）。
+/// 除 `skip` 外其它栅栏 + 全部小组件的当前边界（碰撞/吸附的锚点集合，物理像素）。
+/// 栅栏与小组件互不重叠：移动/缩放任一对象时，另一类对象都是障碍。
 fn other_bounds(rt: &Runtime, skip: usize) -> Vec<Rect> {
-    rt.desk
+    let mut v: Vec<Rect> = rt
+        .desk
         .fences
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != skip)
         .map(|(_, f)| f.bounds)
-        .collect()
+        .collect();
+    let s = rt.theme.scale;
+    for w in &rt.desk.widgets {
+        v.push(Rect::new(
+            w.bounds.x * s,
+            w.bounds.y * s,
+            w.bounds.w * s,
+            w.bounds.h * s,
+        ));
+    }
+    v
+}
+
+/// 小组件移动/缩放时的障碍：全部栅栏 + 其它小组件（物理像素）。
+fn widget_obstacles(rt: &Runtime, skip: u64) -> Vec<Rect> {
+    let s = rt.theme.scale;
+    let mut v: Vec<Rect> = rt.desk.fences.iter().map(|f| f.bounds).collect();
+    for w in &rt.desk.widgets {
+        if w.id == skip {
+            continue;
+        }
+        v.push(Rect::new(
+            w.bounds.x * s,
+            w.bounds.y * s,
+            w.bounds.w * s,
+            w.bounds.h * s,
+        ));
+    }
+    v
 }
 
 /// 虚拟屏幕边界（物理像素；栅栏活动范围）。
@@ -1184,6 +1214,31 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                     tracing::warn!("添加栅栏持久化失败: {e}");
                 }
             }
+            ConsoleZone::RemoveFence => {
+                // 移出当前选中的栅栏：成员退回未分组区，栅栏删除（与右键「删除栅栏」一致）
+                let i = rt
+                    .selected_fence
+                    .min(rt.desk.fences.len().saturating_sub(1));
+                let ids: Vec<String> = rt
+                    .desk
+                    .fences
+                    .get(i)
+                    .map(|f| f.icon_ids.clone())
+                    .unwrap_or_default();
+                for id in ids {
+                    rt.desk.move_icon(&id, None);
+                }
+                if i < rt.desk.fences.len() {
+                    rt.desk.fences.remove(i);
+                }
+                rt.selected_fence = rt
+                    .selected_fence
+                    .saturating_sub(1)
+                    .min(rt.desk.fences.len());
+                if let Err(e) = rt.store.save(&rt.desk) {
+                    tracing::warn!("移出栅栏持久化失败: {e}");
+                }
+            }
         },
         OverlayEvent::ConsoleScroll { delta } => {
             // 栅栏管理页滚轮：滚动栅栏列表
@@ -1207,14 +1262,31 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
         }
         OverlayEvent::WidgetMove { widget, pos } => {
             let s = rt.theme.scale;
-            let mut target = None;
+            // 防重叠：候选矩形（物理）与栅栏/其它小组件结算，禁止侵入
+            let (cw, ch) = rt
+                .desk
+                .widgets
+                .iter()
+                .find(|w| w.id == widget)
+                .map(|w| (w.bounds.w * s, w.bounds.h * s))
+                .unwrap_or((0.0, 0.0));
+            let cand = Rect::new(pos.0, pos.1, cw, ch);
+            let obstacles = widget_obstacles(rt, widget);
+            let out = settle_move(&cand, &obstacles, &screen_rect(rt), FENCE_GAP);
             if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                // 事件坐标是物理像素，模型存 DIP（跨 DPI 稳定）→ 除以缩放
-                w.bounds.x = pos.0 / s;
-                w.bounds.y = pos.1 / s;
-                target = Some(w.bounds);
+                // 结算结果是物理像素，模型存 DIP（跨 DPI 稳定）→ 除以缩放
+                w.bounds.x = out.x / s;
+                w.bounds.y = out.y / s;
+                // 内联编辑跟随移动（输入框不能停在原位置）
+                sync_edit_rect_for_widget(rt, widget);
             }
-            if let Some(to) = target {
+            if let Some(to) = rt
+                .desk
+                .widgets
+                .iter()
+                .find(|w| w.id == widget)
+                .map(|w| w.bounds)
+            {
                 // 丝滑跟随：视觉矩形从当前位置追过去（模型已落到目标）
                 let from = widget_visual_rect(rt, widget);
                 set_widget_tween(
@@ -1231,13 +1303,32 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
         }
         OverlayEvent::WidgetResize { widget, rect } => {
             let s = rt.theme.scale;
-            let mut target = None;
+            // 防重叠：右下角缩放，锚定左上角，与栅栏/其它小组件结算
+            let cand = Rect::new(rect.0, rect.1, rect.2, rect.3);
+            let obstacles = widget_obstacles(rt, widget);
+            let out = settle_resize(
+                &cand,
+                &obstacles,
+                &screen_rect(rt),
+                FreeSides::BottomRight,
+                WIDGET_MIN_W * s,
+                WIDGET_MIN_H * s,
+                FENCE_GAP,
+            );
             if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                w.bounds.w = (rect.2 / s).max(WIDGET_MIN_W);
-                w.bounds.h = (rect.3 / s).max(WIDGET_MIN_H);
-                target = Some(w.bounds);
+                w.bounds.x = out.x / s;
+                w.bounds.y = out.y / s;
+                w.bounds.w = out.w / s;
+                w.bounds.h = out.h / s;
+                sync_edit_rect_for_widget(rt, widget);
             }
-            if let Some(to) = target {
+            if let Some(to) = rt
+                .desk
+                .widgets
+                .iter()
+                .find(|w| w.id == widget)
+                .map(|w| w.bounds)
+            {
                 let from = widget_visual_rect(rt, widget);
                 set_widget_tween(
                     rt,
@@ -1351,6 +1442,16 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
             } else {
                 start_panel_tween(rt, 0.0);
             }
+        }
+        OverlayEvent::TrayToggle => {
+            // 托盘图标双击：切换控制中心开合（与 Ctrl+Alt+T 相同）
+            let open = !rt.desk.console_open;
+            rt.desk.console_open = open;
+            let _ = rt.store.save(&rt.desk);
+            start_panel_tween(rt, if open { 1.0 } else { 0.0 });
+        }
+        OverlayEvent::TrayMenu => {
+            handle_tray_menu(rt);
         }
         OverlayEvent::EditCommitted => {
             // 就地重命名提交后的注入事件：数据已改好，这里只需让尾部重建场景。
@@ -1512,6 +1613,41 @@ fn widget_notes_rect(rt: &Runtime, w: &WidgetInstance) -> RectF {
     }
 }
 
+/// 小组件移动/缩放后，让激活中的内联编辑跟随新位置（输入框与卡片同步移动）。
+fn sync_edit_rect_for_widget(rt: &mut Runtime, widget: u64) {
+    let Some(edit) = rt.edit.as_ref() else {
+        return;
+    };
+    let targets_this = match edit.target {
+        EditTarget::WidgetTodo { widget: w }
+        | EditTarget::WidgetNotes { widget: w }
+        | EditTarget::WidgetRename { widget: w } => w == widget,
+        _ => false,
+    };
+    if !targets_this {
+        return;
+    }
+    let target = edit.target;
+    let Some(w) = rt.desk.widgets.iter().find(|w| w.id == widget) else {
+        return;
+    };
+    let s = rt.theme.scale;
+    let rect = match target {
+        EditTarget::WidgetTodo { .. } => widget_input_rect(rt, w),
+        EditTarget::WidgetNotes { .. } => widget_notes_rect(rt, w),
+        EditTarget::WidgetRename { .. } => RectF {
+            x: w.bounds.x * s + WIDGET_PAD * s,
+            y: w.bounds.y * s + (WIDGET_TITLE_H * s - 26.0 * s) / 2.0,
+            w: w.bounds.w * s - 2.0 * WIDGET_PAD * s - 40.0 * s,
+            h: 26.0 * s,
+        },
+        _ => return,
+    };
+    if let Some(e) = rt.edit.as_mut() {
+        e.rect = rect;
+    }
+}
+
 /// 小组件控件点击：勾选/删除/关闭/聚焦输入。
 fn handle_widget_click(rt: &mut Runtime, widget: u64, zone: WidgetZone) {
     match zone {
@@ -1589,6 +1725,51 @@ fn handle_widget_context_menu(rt: &mut Runtime, widget: u64, _pos: (f32, f32)) {
     match cmd {
         MENU_RENAME_WIDGET => start_widget_rename(rt, widget),
         MENU_REMOVE_WIDGET => close_widget(rt, widget),
+        _ => {}
+    }
+}
+
+/// 托盘图标右键菜单：显示控制中心 / 退出。
+fn handle_tray_menu(rt: &mut Runtime) {
+    const MENU_TRAY_CONSOLE: usize = 8200;
+    const MENU_TRAY_QUIT: usize = 8201;
+    let menu = popup_menu();
+    if menu.is_invalid() {
+        return;
+    }
+    unsafe {
+        let s = wide("显示 Sylva 控制中心");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_TRAY_CONSOLE, PCWSTR(s.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let s = wide("退出 Sylva");
+        let _ = AppendMenuW(menu, MF_STRING, MENU_TRAY_QUIT, PCWSTR(s.as_ptr()));
+    }
+    let (sx, sy) = cursor_screen();
+    let cmd = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY,
+            sx,
+            sy,
+            Some(0),
+            rt.hwnd,
+            None,
+        )
+        .0 as usize
+    };
+    unsafe {
+        let _ = DestroyMenu(menu);
+    }
+    match cmd {
+        MENU_TRAY_CONSOLE => {
+            let open = !rt.desk.console_open;
+            rt.desk.console_open = open;
+            let _ = rt.store.save(&rt.desk);
+            start_panel_tween(rt, if open { 1.0 } else { 0.0 });
+        }
+        MENU_TRAY_QUIT => unsafe {
+            let _ = PostMessageW(Some(rt.hwnd), WM_APP_QUIT, WPARAM(0), LPARAM(0));
+        },
         _ => {}
     }
 }
@@ -3738,6 +3919,13 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
             });
             x += sw + gap;
         }
+        // 「移出栅栏」按钮（详情卡右上角）
+        let remove_btn = RectF {
+            x: d.x + d.w - 68.0 * s,
+            y: d.y + 2.0 * s,
+            w: 64.0 * s,
+            h: 22.0 * s,
+        };
         Some(SceneFenceDetail {
             rect: d,
             title: desk.fences[sel]
@@ -3758,6 +3946,7 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
             style_filled,
             tint_default,
             tints,
+            remove_btn,
         })
     } else {
         None
@@ -4378,6 +4567,7 @@ fn hit_model_from(theme: &Theme, scene: &Scene, _desk: &Desk) -> HitModel {
                         zones.push((ConsoleZone::FenceSelect(i), r.rect));
                     }
                     if let Some(d) = &c.fence_detail {
+                        zones.push((ConsoleZone::RemoveFence, d.remove_btn));
                         zones.push((ConsoleZone::FenceLayout(FenceLayout::Grid), d.layout_grid));
                         zones.push((ConsoleZone::FenceLayout(FenceLayout::List), d.layout_list));
                         zones.push((ConsoleZone::FenceIconSize(32.0), d.size_s));
