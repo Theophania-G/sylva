@@ -1,0 +1,18 @@
+[package]
+name = "sylva-installer"
+version = "0.1.0"
+edition = "2021"
+
+# 独立于主工作区（打包工具，不参与主工程的 workspace）
+[workspace]
+
+[dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

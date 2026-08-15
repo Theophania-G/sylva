@@ -4,3 +4,4 @@
 *.log
 *.exe
 *.pdb
+scripts/installer/target
