@@ -16,6 +16,10 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[build-dependencies]
+# 把 sylva.ico 编译进安装器 exe 资源（与主程序同一个图标）
+winres = "0.1"
+
 [profile.release]
 opt-level = "z"
 lto = true

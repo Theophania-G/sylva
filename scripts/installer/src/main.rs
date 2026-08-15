@@ -18,10 +18,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetSystemMetrics, GetWindowLongPtrW, LoadIconW, PostQuitMessage, RegisterClassW, SendMessageW,
     SetProcessDPIAware, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, BN_CLICKED, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_STATIC,
-    IDI_APPLICATION, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SWP_NOZORDER, SWP_NOSIZE, WM_COMMAND,
+    TranslateMessage, BN_CLICKED, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HICON, HMENU, IDC_STATIC,
+    MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, SWP_NOZORDER, SWP_NOSIZE, WM_COMMAND,
     WM_CTLCOLORBTN, WM_CTLCOLORSTATIC, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_CAPTION, WS_CHILD,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WINDOW_STYLE,
+    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WINDOW_STYLE, ICON_BIG,
+    ICON_SMALL, WM_SETICON,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -48,6 +49,12 @@ struct Installer {
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 加载 exe 内嵌主图标（资源 ID 1 = build.rs 嵌入的 sylva.ico）。
+#[allow(clippy::manual_dangling_ptr)]
+fn app_icon(hinstance: HINSTANCE) -> HICON {
+    unsafe { LoadIconW(Some(hinstance), PCWSTR(1 as *const u16)) }.unwrap_or_default()
 }
 
 fn msgbox(title: &str, text: &str, error: bool) {
@@ -205,11 +212,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     let app_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     match msg {
         WM_COMMAND => {
+            let mut to_destroy = None;
             if app_ptr != 0 {
                 let app = &mut *(app_ptr as *mut Installer);
                 let id = (wparam.0 & 0xFFFF) as usize;
                 let code = (wparam.0 >> 16) as usize;
-                let mut to_destroy = None;
                 if code == BN_CLICKED as usize {
                     match id {
                         ID_BTN_INSTALL => {
@@ -224,10 +231,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         _ => {}
                     }
                 }
-                drop(app);
-                if let Some(h) = to_destroy {
-                    let _ = DestroyWindow(h);
-                }
+            }
+            if let Some(h) = to_destroy {
+                let _ = DestroyWindow(h);
             }
             LRESULT(0)
         }
@@ -272,7 +278,7 @@ fn main() {
         cbClsExtra: 0,
         cbWndExtra: 0,
         hInstance: hinstance,
-        hIcon: unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap_or_default(),
+        hIcon: app_icon(hinstance),
         hCursor: Default::default(),
         hbrBackground: unsafe { CreateSolidBrush(DARK_BG) },
         lpszMenuName: PCWSTR::null(),
@@ -300,6 +306,12 @@ fn main() {
         msgbox("Sylva 安装", "无法创建安装窗口。", true);
         return;
     };
+    // 窗口图标（标题栏 / 任务栏 / Alt+Tab）用与主程序相同的 sylva 图标
+    unsafe {
+        let hicon = app_icon(hinstance);
+        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(hicon.0 as isize)));
+        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(hicon.0 as isize)));
+    }
 
     // 居中
     unsafe {
