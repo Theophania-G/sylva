@@ -60,14 +60,12 @@ use sylva_core::config::ConfigStore;
 use sylva_core::magnet::{settle_move, settle_resize, FreeSides, FENCE_GAP};
 use sylva_core::model::{
     Desk, Fence, FenceAppearance, FenceLayout, FenceState, FenceStyle, Icon, Rect, Vec2,
-    WidgetData, WidgetInstance, WidgetKind,
 };
 use sylva_render::{
-    run_message_loop, Compositor, ConsoleHit, ConsoleTab, ConsoleZone, FenceHit, HitModel, IconHit,
+    run_message_loop, Compositor, ConsoleHit, ConsoleZone, FenceHit, HitModel, IconHit,
     ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone, Scene, SceneConsole,
-    SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, SceneTab, SceneTodoRow,
-    SceneWidget, SceneWidgetRow, Theme, WidgetHit, WidgetZone, GRIP_SIZE, WM_APP_QUIT,
-    WM_SYLVA_INJECT,
+    SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, Theme, GRIP_SIZE,
+    WM_APP_QUIT, WM_SYLVA_INJECT,
 };
 use sylva_shell::icons::IconData;
 use sylva_shell::items::DesktopItem;
@@ -121,8 +119,6 @@ const CONSOLE_MIN_H: f32 = 170.0;
 const CONSOLE_MARGIN: f32 = 24.0;
 /// 标题栏高度（拖动把手；关闭按钮位于其中）。
 const CONSOLE_TITLE_H: f32 = 40.0;
-/// 控制中心标签栏高度（待办 / 便签 / 栅栏 / 插件）。
-const CONSOLE_TAB_H: f32 = 34.0;
 /// 关闭按钮边长。
 const CONSOLE_CLOSE_W: f32 = 32.0;
 /// 标题栏「切换桌面」按钮宽度。
@@ -131,8 +127,6 @@ const CONSOLE_TOGGLE_W: f32 = 86.0;
 const CONSOLE_PAD: f32 = 12.0;
 /// 折叠胶囊高度（始终可见的控制中心入口）。
 const CONSOLE_PILL_H: f32 = 34.0;
-/// 组件页：每行高度。
-const CONSOLE_WIDGET_ROW_H: f32 = 40.0;
 /// 组件页：添加按钮高度。
 const CONSOLE_ADD_BTN_H: f32 = 34.0;
 /// 栅栏管理页：每行高度。
@@ -143,25 +137,6 @@ const CONSOLE_FENCE_MAX_ROWS: usize = 5;
 const CONSOLE_FENCE_DETAIL_H: f32 = 158.0;
 /// 控制台展开面板最大高度（DIP；内容再多也滚动）。
 const CONSOLE_MAX_H: f32 = 640.0;
-
-// ---- 桌面小组件（插件实例）布局常量（DIP）----
-/// 小组件标题栏高度。
-const WIDGET_TITLE_H: f32 = 34.0;
-/// 小组件内边距。
-const WIDGET_PAD: f32 = 10.0;
-/// 待办小组件输入行高度。
-const WIDGET_INPUT_H: f32 = 30.0;
-/// 待办小组件单行高度。
-const WIDGET_ROW_H: f32 = 36.0;
-/// 待办小组件最多显示行数（超出滚动）。
-const WIDGET_MAX_ROWS: usize = 7;
-/// 小组件最小尺寸（缩放钳制）。
-const WIDGET_MIN_W: f32 = 180.0;
-const WIDGET_MIN_H: f32 = 120.0;
-/// 新小组件的初始摆放（左上角 + 级联步进，DIP）。
-const WIDGET_START_X: f32 = 96.0;
-const WIDGET_START_Y: f32 = 120.0;
-const WIDGET_CASCADE: f32 = 28.0;
 
 /// 背景色调预设（标签, RGB 0..1）：菜单项顺序即此处顺序（+1 起）。
 const TINT_PRESETS: &[(&str, [f32; 3])] = &[
@@ -230,26 +205,12 @@ struct Runtime {
     console_anim: ConsoleAnim,
     /// 桌面切换时栅栏整体淡出/淡入补间（None = 无动画，按 `desk.desktop_mode` 取最终值）。
     desktop_fade: Option<PanelTween>,
-    /// 控制中心当前标签页下标（与 `console_tab_order` 返回的顺序一致）。
-    console_tab: usize,
     /// 栅栏管理页当前选中的栅栏下标。
     selected_fence: usize,
     /// 当前悬停的控制台控件（绘制高亮反馈用）。
     console_hover: Option<ConsoleZone>,
-    /// 当前悬停的小组件控件（widget id, 控件）。
-    widget_hover: Option<(u64, Option<WidgetZone>)>,
-    /// 小组件内待办行的动画状态（(widget id, todo id) → 入场/勾选补间）。
-    widget_anims: HashMap<(u64, u64), RowAnim>,
-    /// 关闭中的小组件（淡出结束后从模型移除）。
-    closing_widgets: Vec<ClosingWidget>,
-    /// 新建中的小组件（淡入动画）。
-    spawning_widgets: Vec<ClosingWidget>,
-    /// 小组件拖动/缩放补间（视觉矩形追赶模型，与栅栏同机制）。
-    widget_tweens: Vec<FenceTween>,
     /// 栅栏管理页列表滚动偏移（物理像素）。
     fence_scroll: f32,
-    /// 各小组件待办列表的滚动偏移（widget id → 物理像素）。
-    widget_scrolls: HashMap<u64, f32>,
     /// 栅栏拖动/缩放补间（多个栅栏可同时动；结束自动移除）。
     fence_tweens: Vec<FenceTween>,
     /// 图标悬停放大补间（一次只有一个悬停图标）。
@@ -268,28 +229,11 @@ struct Runtime {
     last_trim: std::time::Instant,
 }
 
-/// 内联编辑目标：小组件输入/便签 / 栅栏内图标重命名 / 栅栏标题重命名。
+/// 内联编辑目标：栅栏内图标重命名 / 栅栏标题重命名。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditTarget {
-    /// 待办小组件的添加输入行。
-    WidgetTodo {
-        widget: u64,
-    },
-    /// 便签小组件的正文（多行）。
-    WidgetNotes {
-        widget: u64,
-    },
-    /// 小组件标题重命名。
-    WidgetRename {
-        widget: u64,
-    },
-    Item {
-        fence: usize,
-        icon: usize,
-    },
-    FenceTitle {
-        fence: usize,
-    },
+    Item { fence: usize, icon: usize },
+    FenceTitle { fence: usize },
 }
 
 /// D2D 内联文本编辑：文本、光标与 IME 合成状态全在 App 层，绘制与输入同表面，
@@ -316,10 +260,6 @@ struct InlineEdit {
 }
 
 impl InlineEdit {
-    fn text(&self) -> String {
-        self.lines.join("\n")
-    }
-
     fn current_line(&self) -> &str {
         self.lines.get(self.line).map(|s| s.as_str()).unwrap_or("")
     }
@@ -445,13 +385,6 @@ impl InlineEdit {
     }
 }
 
-/// 关闭中的小组件（淡出动画；结束后从模型移除）。
-struct ClosingWidget {
-    id: u64,
-    t0: Instant,
-    dur: f32,
-}
-
 /// 面板展开/折叠补间（`from→to`，`dur` 秒，ease_out_cubic）。
 #[derive(Debug, Clone, Copy)]
 struct PanelTween {
@@ -461,28 +394,9 @@ struct PanelTween {
     to: f32,
 }
 
-/// 待办行动画（入场 / 完成勾选交叉淡化）。
-#[derive(Debug, Clone, Copy)]
-struct RowEnter {
-    t0: Instant,
-    dur: f32,
-}
-#[derive(Debug, Clone, Copy)]
-struct RowToggle {
-    t0: Instant,
-    dur: f32,
-}
-
-/// 待办行的动画状态（按行 id 索引）。
-#[derive(Debug, Clone, Copy, Default)]
-struct RowAnim {
-    enter: Option<RowEnter>,
-    toggle: Option<RowToggle>,
-}
-
 /// 控制台面板动画状态（App 层驱动，overlay `AnimTick` 定时推进）。
 struct ConsoleAnim {
-    /// 面板展开进度 0..1（0=折叠胶囊，1=完整面板）。已 ease 插值。
+    /// 面板展开进度 0..1（0=完全隐藏，1=完整面板）。已 ease 插值。
     panel: f32,
     panel_tween: Option<PanelTween>,
 }
@@ -600,15 +514,12 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
     let store = ConfigStore::new(data_dir.to_path_buf());
     let mut desk = store.load()?;
     desk.validate();
-    // 旧版 desk.todos → 桌面小组件迁移（首次运行建一个待办小组件，之后不再迁移）。
-    desk.migrate_widgets();
     // 内部库文件夹（软件目录下）：粘贴/拖入的文件先物理复制进来，栅栏索引库内副本。
     // 库内文件被外部删除时，栅栏对应项同步移除（定时器 `SyncLibrary` 与启动时各清一次）。
     let library_dir = data_dir.join("library");
     let _ = std::fs::create_dir_all(&library_dir);
     tracing::info!(
         fences = desk.fences.len(),
-        widgets = desk.widgets.len(),
         icons = desk.icons.len(),
         "桌面状态已加载"
     );
@@ -753,16 +664,9 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         edit_high: None,
         console_anim: ConsoleAnim::new(console_open),
         desktop_fade: None,
-        console_tab: 0,
         selected_fence: 0,
         console_hover: None,
-        widget_hover: None,
-        widget_anims: HashMap::new(),
-        closing_widgets: Vec::new(),
-        spawning_widgets: Vec::new(),
-        widget_tweens: Vec::new(),
         fence_scroll: 0.0,
-        widget_scrolls: HashMap::new(),
         fence_tweens: Vec::new(),
         icon_hover: None,
         hierarchy,
@@ -853,45 +757,15 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL {
     BOOL(1) // 已处理，阻止默认终止行为（让主循环干净退出）
 }
 
-/// 除 `skip` 外其它栅栏 + 全部小组件的当前边界（碰撞/吸附的锚点集合，物理像素）。
-/// 栅栏与小组件互不重叠：移动/缩放任一对象时，另一类对象都是障碍。
+/// 除 `skip` 外其它栅栏的当前边界（碰撞/吸附的锚点集合）。
 fn other_bounds(rt: &Runtime, skip: usize) -> Vec<Rect> {
-    let mut v: Vec<Rect> = rt
-        .desk
+    rt.desk
         .fences
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != skip)
         .map(|(_, f)| f.bounds)
-        .collect();
-    let s = rt.theme.scale;
-    for w in &rt.desk.widgets {
-        v.push(Rect::new(
-            w.bounds.x * s,
-            w.bounds.y * s,
-            w.bounds.w * s,
-            w.bounds.h * s,
-        ));
-    }
-    v
-}
-
-/// 小组件移动/缩放时的障碍：全部栅栏 + 其它小组件（物理像素）。
-fn widget_obstacles(rt: &Runtime, skip: u64) -> Vec<Rect> {
-    let s = rt.theme.scale;
-    let mut v: Vec<Rect> = rt.desk.fences.iter().map(|f| f.bounds).collect();
-    for w in &rt.desk.widgets {
-        if w.id == skip {
-            continue;
-        }
-        v.push(Rect::new(
-            w.bounds.x * s,
-            w.bounds.y * s,
-            w.bounds.w * s,
-            w.bounds.h * s,
-        ));
-    }
-    v
+        .collect()
 }
 
 /// 虚拟屏幕边界（物理像素；栅栏活动范围）。
@@ -912,12 +786,6 @@ fn is_popup_dismiss_event(ev: &OverlayEvent) -> bool {
             | OverlayEvent::ContextMenu { .. }
             | OverlayEvent::FilesDropped { .. }
             | OverlayEvent::FenceScroll { .. }
-            // 小组件交互（点控件/拖动/缩放/滚轮）都是真实交互，编辑期间应提交。
-            | OverlayEvent::WidgetClick { .. }
-            | OverlayEvent::WidgetMove { .. }
-            | OverlayEvent::WidgetResize { .. }
-            | OverlayEvent::WidgetScroll { .. }
-            | OverlayEvent::WidgetContextMenu { .. }
             // 控制台交互（点按钮/滚待办/拖动面板/热键开关）都是真实交互，编辑期间应提交。
             | OverlayEvent::ConsoleClick { .. }
             | OverlayEvent::ConsoleScroll { .. }
@@ -1133,11 +1001,6 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                 }
                 start_panel_tween(rt, 1.0);
             }
-            ConsoleZone::Tab(i) => {
-                // 切换标签页
-                let order = console_tab_order(rt);
-                rt.console_tab = i.min(order.len().saturating_sub(1));
-            }
             ConsoleZone::DesktopToggle => {
                 toggle_desktop(rt);
             }
@@ -1188,10 +1051,6 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                 }
                 let _ = rt.store.save(&rt.desk);
             }
-            ConsoleZone::AddWidget(kind) => {
-                // 添加一个桌面小组件（插件实例）
-                add_widget(rt, kind);
-            }
             ConsoleZone::AddFence => {
                 // 新建一个空白栅栏并选中（位置级联，避免叠在已有栅栏上）
                 let id = rt.desk.next_fence_id();
@@ -1239,6 +1098,8 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                     tracing::warn!("移出栅栏持久化失败: {e}");
                 }
             }
+            // 标签页已随小组件一并移除；命中模型不再产生该控件，兜底吞掉。
+            ConsoleZone::Tab(_) => {}
         },
         OverlayEvent::ConsoleScroll { delta } => {
             // 栅栏管理页滚轮：滚动栅栏列表
@@ -1250,120 +1111,6 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
         OverlayEvent::ConsoleHover { zone } => {
             // 控件悬停：存下供下一帧绘制高亮（仅展开面板内上报）
             rt.console_hover = zone;
-        }
-        OverlayEvent::WidgetHover { widget, zone } => {
-            rt.widget_hover = widget.map(|w| (w, zone));
-        }
-        OverlayEvent::WidgetContextMenu { widget, pos } => {
-            handle_widget_context_menu(rt, widget, pos);
-        }
-        OverlayEvent::WidgetClick { widget, zone } => {
-            handle_widget_click(rt, widget, zone);
-        }
-        OverlayEvent::WidgetMove { widget, pos } => {
-            let s = rt.theme.scale;
-            // 防重叠：候选矩形（物理）与栅栏/其它小组件结算，禁止侵入
-            let (cw, ch) = rt
-                .desk
-                .widgets
-                .iter()
-                .find(|w| w.id == widget)
-                .map(|w| (w.bounds.w * s, w.bounds.h * s))
-                .unwrap_or((0.0, 0.0));
-            let cand = Rect::new(pos.0, pos.1, cw, ch);
-            let obstacles = widget_obstacles(rt, widget);
-            let out = settle_move(&cand, &obstacles, &screen_rect(rt), FENCE_GAP);
-            if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                // 结算结果是物理像素，模型存 DIP（跨 DPI 稳定）→ 除以缩放
-                w.bounds.x = out.x / s;
-                w.bounds.y = out.y / s;
-                // 内联编辑跟随移动（输入框不能停在原位置）
-                sync_edit_rect_for_widget(rt, widget);
-            }
-            if let Some(to) = rt
-                .desk
-                .widgets
-                .iter()
-                .find(|w| w.id == widget)
-                .map(|w| w.bounds)
-            {
-                // 丝滑跟随：视觉矩形从当前位置追过去（模型已落到目标）
-                let from = widget_visual_rect(rt, widget);
-                set_widget_tween(
-                    rt,
-                    FenceTween {
-                        fence: widget as usize,
-                        from,
-                        to,
-                        t0: Instant::now(),
-                        dur: 0.12,
-                    },
-                );
-            }
-        }
-        OverlayEvent::WidgetResize { widget, rect } => {
-            let s = rt.theme.scale;
-            // 防重叠：右下角缩放，锚定左上角，与栅栏/其它小组件结算
-            let cand = Rect::new(rect.0, rect.1, rect.2, rect.3);
-            let obstacles = widget_obstacles(rt, widget);
-            let out = settle_resize(
-                &cand,
-                &obstacles,
-                &screen_rect(rt),
-                FreeSides::BottomRight,
-                WIDGET_MIN_W * s,
-                WIDGET_MIN_H * s,
-                FENCE_GAP,
-            );
-            if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                w.bounds.x = out.x / s;
-                w.bounds.y = out.y / s;
-                w.bounds.w = out.w / s;
-                w.bounds.h = out.h / s;
-                sync_edit_rect_for_widget(rt, widget);
-            }
-            if let Some(to) = rt
-                .desk
-                .widgets
-                .iter()
-                .find(|w| w.id == widget)
-                .map(|w| w.bounds)
-            {
-                let from = widget_visual_rect(rt, widget);
-                set_widget_tween(
-                    rt,
-                    FenceTween {
-                        fence: widget as usize,
-                        from,
-                        to,
-                        t0: Instant::now(),
-                        dur: 0.12,
-                    },
-                );
-            }
-        }
-        OverlayEvent::WidgetDragEnd { widget } => {
-            // 拖动/缩放结束：钳制在屏幕内并持久化
-            let screen = screen_rect(rt);
-            let s = rt.theme.scale;
-            if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                w.bounds.x = w.bounds.x.clamp(0.0, (screen.w / s - w.bounds.w).max(0.0));
-                w.bounds.y = w.bounds.y.clamp(0.0, (screen.h / s - w.bounds.h).max(0.0));
-            }
-            if let Err(e) = rt.store.save(&rt.desk) {
-                tracing::warn!("小组件位置持久化失败: {e}");
-            }
-        }
-        OverlayEvent::WidgetScroll { widget, delta } => {
-            // 滚轮滚动小组件待办列表
-            if let Some(w) = rt.desk.widgets.iter().find(|w| w.id == widget) {
-                if w.kind == WidgetKind::Todo {
-                    let max = widget_scroll_max(rt, widget);
-                    let step = WIDGET_ROW_H * rt.theme.scale;
-                    let off = rt.widget_scrolls.entry(widget).or_insert(0.0);
-                    *off = (*off - (delta as f32 / 120.0) * step).clamp(0.0, max);
-                }
-            }
         }
         OverlayEvent::KeyDown { vk, ctrl } => {
             edit_key(rt, vk, ctrl);
@@ -1493,243 +1240,6 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
 }
 
 /// 当前标签页顺序（组件 → 栅栏管理；两个页始终存在）。
-fn console_tab_order(_rt: &Runtime) -> Vec<ConsoleTab> {
-    vec![ConsoleTab::Widgets, ConsoleTab::Fences]
-}
-
-/// 添加一个桌面小组件（插件实例）：在桌面上新多出一张卡片。
-fn add_widget(rt: &mut Runtime, kind: WidgetKind) {
-    let id = rt.desk.next_widget_id();
-    let n = rt.desk.widgets.len();
-    let x = WIDGET_START_X + n as f32 * WIDGET_CASCADE;
-    let y = WIDGET_START_Y + n as f32 * WIDGET_CASCADE;
-    rt.desk.widgets.push(WidgetInstance::new(id, kind, x, y));
-    // 新建淡入
-    rt.spawning_widgets.push(ClosingWidget {
-        id,
-        t0: Instant::now(),
-        dur: 0.24,
-    });
-    arm_anim_timer(rt);
-    if let Err(e) = rt.store.save(&rt.desk) {
-        tracing::warn!("小组件持久化失败: {e}");
-    }
-}
-
-/// 关闭小组件：先淡出（closing 列表），动画结束后从模型移除。
-fn close_widget(rt: &mut Runtime, widget: u64) {
-    if rt.closing_widgets.iter().any(|c| c.id == widget) {
-        return;
-    }
-    rt.closing_widgets.push(ClosingWidget {
-        id: widget,
-        t0: Instant::now(),
-        dur: 0.2,
-    });
-    arm_anim_timer(rt);
-}
-
-/// 小组件待办列表最大可滚动量（物理像素；0 = 行数不超出可视区）。
-fn widget_scroll_max(rt: &Runtime, widget: u64) -> f32 {
-    let Some(w) = rt.desk.widgets.iter().find(|w| w.id == widget) else {
-        return 0.0;
-    };
-    let Some(t) = w.todo() else {
-        return 0.0;
-    };
-    let s = rt.theme.scale;
-    let shown = widget_visible_rows(rt, w);
-    if t.items.len() <= shown {
-        0.0
-    } else {
-        (t.items.len() - shown) as f32 * WIDGET_ROW_H * s
-    }
-}
-
-/// 待办小组件可视行数（受卡片高度与 `WIDGET_MAX_ROWS` 双重限制）。
-fn widget_visible_rows(rt: &Runtime, w: &WidgetInstance) -> usize {
-    let s = rt.theme.scale;
-    let h = w.bounds.h * s;
-    let input_h = WIDGET_INPUT_H * s;
-    let head = WIDGET_TITLE_H * s + WIDGET_PAD * s + input_h + WIDGET_PAD * s;
-    let rows = ((h - head - WIDGET_PAD * s) / (WIDGET_ROW_H * s))
-        .floor()
-        .max(0.0) as usize;
-    rows.min(WIDGET_MAX_ROWS)
-}
-
-/// 待办小组件的输入行矩形（物理像素；与绘制/命中几何一致）。
-fn widget_input_rect(rt: &Runtime, w: &WidgetInstance) -> RectF {
-    let s = rt.theme.scale;
-    RectF {
-        x: w.bounds.x * s + WIDGET_PAD * s,
-        y: w.bounds.y * s + WIDGET_TITLE_H * s + WIDGET_PAD * s,
-        w: w.bounds.w * s - 2.0 * WIDGET_PAD * s,
-        h: WIDGET_INPUT_H * s,
-    }
-}
-
-/// 小组件当前视觉矩形（补间插值；无补间 = 模型矩形，DIP）。
-fn widget_visual_rect(rt: &Runtime, widget: u64) -> Rect {
-    let now = Instant::now();
-    if let Some(t) = rt.widget_tweens.iter().find(|t| t.fence == widget as usize) {
-        match tween_progress(t.t0, t.dur, now) {
-            Some(p) => {
-                let e = ease_out_cubic(p);
-                Rect::new(
-                    t.from.x + (t.to.x - t.from.x) * e,
-                    t.from.y + (t.to.y - t.from.y) * e,
-                    t.from.w + (t.to.w - t.from.w) * e,
-                    t.from.h + (t.to.h - t.from.h) * e,
-                )
-            }
-            None => t.to,
-        }
-    } else {
-        rt.desk
-            .widgets
-            .iter()
-            .find(|w| w.id == widget)
-            .map(|w| w.bounds)
-            .unwrap_or_default()
-    }
-}
-
-/// 记录/替换小组件补间并启动动画定时器。
-fn set_widget_tween(rt: &mut Runtime, tween: FenceTween) {
-    rt.widget_tweens.retain(|t| t.fence != tween.fence);
-    rt.widget_tweens.push(tween);
-    arm_anim_timer(rt);
-}
-
-/// 便签小组件正文区矩形（物理像素）。
-fn widget_notes_rect(rt: &Runtime, w: &WidgetInstance) -> RectF {
-    let s = rt.theme.scale;
-    RectF {
-        x: w.bounds.x * s + WIDGET_PAD * s,
-        y: w.bounds.y * s + WIDGET_TITLE_H * s + WIDGET_PAD * s,
-        w: w.bounds.w * s - 2.0 * WIDGET_PAD * s,
-        h: w.bounds.h * s - WIDGET_TITLE_H * s - 2.0 * WIDGET_PAD * s,
-    }
-}
-
-/// 小组件移动/缩放后，让激活中的内联编辑跟随新位置（输入框与卡片同步移动）。
-fn sync_edit_rect_for_widget(rt: &mut Runtime, widget: u64) {
-    let Some(edit) = rt.edit.as_ref() else {
-        return;
-    };
-    let targets_this = match edit.target {
-        EditTarget::WidgetTodo { widget: w }
-        | EditTarget::WidgetNotes { widget: w }
-        | EditTarget::WidgetRename { widget: w } => w == widget,
-        _ => false,
-    };
-    if !targets_this {
-        return;
-    }
-    let target = edit.target;
-    let Some(w) = rt.desk.widgets.iter().find(|w| w.id == widget) else {
-        return;
-    };
-    let s = rt.theme.scale;
-    let rect = match target {
-        EditTarget::WidgetTodo { .. } => widget_input_rect(rt, w),
-        EditTarget::WidgetNotes { .. } => widget_notes_rect(rt, w),
-        EditTarget::WidgetRename { .. } => RectF {
-            x: w.bounds.x * s + WIDGET_PAD * s,
-            y: w.bounds.y * s + (WIDGET_TITLE_H * s - 26.0 * s) / 2.0,
-            w: w.bounds.w * s - 2.0 * WIDGET_PAD * s - 40.0 * s,
-            h: 26.0 * s,
-        },
-        _ => return,
-    };
-    if let Some(e) = rt.edit.as_mut() {
-        e.rect = rect;
-    }
-}
-
-/// 小组件控件点击：勾选/删除/关闭/聚焦输入。
-fn handle_widget_click(rt: &mut Runtime, widget: u64, zone: WidgetZone) {
-    match zone {
-        WidgetZone::Close => close_widget(rt, widget),
-        WidgetZone::Toggle(i) => {
-            if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                if let Some(t) = w.todo_mut() {
-                    if let Some(item) = t.items.get_mut(i) {
-                        item.done = !item.done;
-                        let id = item.id;
-                        rt.widget_anims.entry((widget, id)).or_default().toggle = Some(RowToggle {
-                            t0: Instant::now(),
-                            dur: 0.16,
-                        });
-                        arm_anim_timer(rt);
-                    }
-                }
-            }
-            let _ = rt.store.save(&rt.desk);
-        }
-        WidgetZone::Delete(i) => {
-            if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                if let Some(t) = w.todo_mut() {
-                    if i < t.items.len() {
-                        t.items.remove(i);
-                    }
-                }
-            }
-            let _ = rt.store.save(&rt.desk);
-        }
-        WidgetZone::Input => start_widget_todo_edit(rt, widget),
-        WidgetZone::Add => {
-            // 只提交「正在编辑该小组件输入行」的文本
-            if let Some(e) = rt.edit.as_ref() {
-                if matches!(e.target, EditTarget::WidgetTodo { widget: w } if w == widget) {
-                    commit_edit(rt);
-                }
-            }
-        }
-        WidgetZone::Notes => start_notes_edit(rt, widget),
-        WidgetZone::Title | WidgetZone::Grip => {}
-    }
-}
-
-/// 小组件右键菜单：重命名组件 / 移出组件（与栅栏同一套桌面级管理方式）。
-fn handle_widget_context_menu(rt: &mut Runtime, widget: u64, _pos: (f32, f32)) {
-    const MENU_RENAME_WIDGET: usize = 8100;
-    const MENU_REMOVE_WIDGET: usize = 8101;
-    let menu = popup_menu();
-    if menu.is_invalid() {
-        return;
-    }
-    unsafe {
-        let s = wide("重命名组件");
-        let _ = AppendMenuW(menu, MF_STRING, MENU_RENAME_WIDGET, PCWSTR(s.as_ptr()));
-        let s = wide("移出组件");
-        let _ = AppendMenuW(menu, MF_STRING, MENU_REMOVE_WIDGET, PCWSTR(s.as_ptr()));
-    }
-    let (sx, sy) = cursor_screen();
-    let cmd = unsafe {
-        TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_NONOTIFY,
-            sx,
-            sy,
-            Some(0),
-            rt.hwnd,
-            None,
-        )
-        .0 as usize
-    };
-    unsafe {
-        let _ = DestroyMenu(menu);
-    }
-    match cmd {
-        MENU_RENAME_WIDGET => start_widget_rename(rt, widget),
-        MENU_REMOVE_WIDGET => close_widget(rt, widget),
-        _ => {}
-    }
-}
-
-/// 托盘图标右键菜单：显示控制中心 / 退出。
 fn handle_tray_menu(rt: &mut Runtime) {
     const MENU_TRAY_CONSOLE: usize = 8200;
     const MENU_TRAY_QUIT: usize = 8201;
@@ -1780,123 +1290,12 @@ fn focus_overlay(rt: &Runtime) {
     unsafe { (*rt.overlay_ptr).focus_for_input() };
 }
 
-/// 开始编辑待办小组件的添加输入行（D2D 内联，Enter/失焦提交）。
-fn start_widget_todo_edit(rt: &mut Runtime, widget: u64) {
-    let Some(w) = rt.desk.widgets.iter().find(|w| w.id == widget) else {
-        return;
-    };
-    let rect = widget_input_rect(rt, w);
-    rt.edit = Some(InlineEdit {
-        target: EditTarget::WidgetTodo { widget },
-        rect,
-        lines: vec![String::new()],
-        line: 0,
-        col: 0,
-        placeholder: "添加待办事项…".into(),
-        single_line: true,
-        focused: true,
-        composing: false,
-        comp: String::new(),
-        committing: false,
-    });
-    focus_overlay(rt);
-}
-
-/// 开始编辑便签小组件正文（多行，失焦自动保存）。
-fn start_notes_edit(rt: &mut Runtime, widget: u64) {
-    let Some(w) = rt.desk.widgets.iter().find(|w| w.id == widget) else {
-        return;
-    };
-    let rect = widget_notes_rect(rt, w);
-    let lines: Vec<String> = w.notes_text().split('\n').map(|s| s.to_string()).collect();
-    rt.edit = Some(InlineEdit {
-        target: EditTarget::WidgetNotes { widget },
-        rect,
-        lines: if lines.is_empty() {
-            vec![String::new()]
-        } else {
-            lines
-        },
-        line: 0,
-        col: 0,
-        placeholder: "记点什么…".into(),
-        single_line: false,
-        focused: true,
-        composing: false,
-        comp: String::new(),
-        committing: false,
-    });
-    focus_overlay(rt);
-}
-
-/// 开始重命名小组件标题（D2D 内联，Enter/失焦提交）。
-fn start_widget_rename(rt: &mut Runtime, widget: u64) {
-    let Some(w) = rt.desk.widgets.iter().find(|w| w.id == widget) else {
-        return;
-    };
-    let s = rt.theme.scale;
-    let rect = RectF {
-        x: w.bounds.x * s + WIDGET_PAD * s,
-        y: w.bounds.y * s + (WIDGET_TITLE_H * s - 26.0 * s) / 2.0,
-        w: w.bounds.w * s - 2.0 * WIDGET_PAD * s - 40.0 * s,
-        h: 26.0 * s,
-    };
-    rt.edit = Some(InlineEdit {
-        target: EditTarget::WidgetRename { widget },
-        rect,
-        lines: vec![w.title.clone()],
-        line: 0,
-        col: 0,
-        placeholder: String::new(),
-        single_line: true,
-        focused: true,
-        composing: false,
-        comp: String::new(),
-        committing: false,
-    });
-    focus_overlay(rt);
-    position_ime_window(rt);
-}
-
-/// 内联编辑失焦/点击别处：待办输入提交（非空）、便签保存、重命名提交。
+/// 内联编辑失焦/点击别处：重命名提交（资源管理器行为）。
 fn dismiss_edit(rt: &mut Runtime) {
     let Some(edit) = rt.edit.take() else {
         return;
     };
     match edit.target {
-        EditTarget::WidgetTodo { widget } => {
-            let text = edit.lines.join("").trim().to_string();
-            if !text.is_empty() {
-                if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                    if let Some(t) = w.todo_mut() {
-                        let id = t.next_id;
-                        t.add(text, String::new());
-                        rt.widget_anims.entry((widget, id)).or_default().enter = Some(RowEnter {
-                            t0: Instant::now(),
-                            dur: 0.2,
-                        });
-                        arm_anim_timer(rt);
-                    }
-                }
-            }
-            let _ = rt.store.save(&rt.desk);
-        }
-        EditTarget::WidgetNotes { widget } => {
-            let text = edit.text();
-            if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                w.data = WidgetData::Notes(text);
-            }
-            let _ = rt.store.save(&rt.desk);
-        }
-        EditTarget::WidgetRename { widget } => {
-            let text = edit.lines.join("").trim().to_string();
-            if !text.is_empty() {
-                if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                    w.title = text;
-                }
-                let _ = rt.store.save(&rt.desk);
-            }
-        }
         EditTarget::FenceTitle { fence } => {
             let text = edit.lines.join("").trim().to_string();
             if apply_rename(rt, EditTarget::FenceTitle { fence }, &text) {
@@ -1912,35 +1311,12 @@ fn dismiss_edit(rt: &mut Runtime) {
     }
 }
 
-/// 提交当前编辑（单行 Enter）：待办输入添加一条并清空（保持聚焦）；重命名提交并关闭。
+/// 提交当前编辑（单行 Enter）：重命名提交并关闭。
 fn commit_edit(rt: &mut Runtime) {
     let Some((target, text)) = rt.edit.as_ref().map(|e| (e.target, e.lines.join(""))) else {
         return;
     };
     match target {
-        EditTarget::WidgetTodo { widget } => {
-            let text = text.trim().to_string();
-            if !text.is_empty() {
-                if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                    if let Some(t) = w.todo_mut() {
-                        let id = t.next_id;
-                        t.add(text, String::new());
-                        rt.widget_anims.entry((widget, id)).or_default().enter = Some(RowEnter {
-                            t0: Instant::now(),
-                            dur: 0.2,
-                        });
-                    }
-                }
-                let _ = rt.store.save(&rt.desk);
-            }
-            if let Some(e) = rt.edit.as_mut() {
-                e.lines = vec![String::new()];
-                e.line = 0;
-                e.col = 0;
-            }
-            arm_anim_timer(rt);
-            position_ime_window(rt);
-        }
         target @ (EditTarget::FenceTitle { .. } | EditTarget::Item { .. }) => {
             // 重命名：Enter = 提交并关闭
             let text = text.trim().to_string();
@@ -1955,19 +1331,6 @@ fn commit_edit(rt: &mut Runtime) {
                     apply_rename(rt, EditTarget::Item { fence, icon }, &text)
                         .then(|| inject_rebuild(rt));
                 }
-                _ => {}
-            }
-        }
-        EditTarget::WidgetNotes { .. } => {}
-        EditTarget::WidgetRename { widget } => {
-            // 小组件重命名：Enter = 提交并关闭
-            let text = text.trim().to_string();
-            rt.edit = None;
-            if !text.is_empty() {
-                if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                    w.title = text;
-                }
-                let _ = rt.store.save(&rt.desk);
             }
         }
     }
@@ -1989,19 +1352,11 @@ fn edit_key(rt: &mut Runtime, vk: u32, ctrl: bool) {
                 caret_moved = true;
             }
         }
-        v if v == VK_ESCAPE.0 as u32 => match rt.edit.as_ref().map(|e| e.target) {
-            Some(EditTarget::WidgetTodo { .. }) => {
-                if let Some(e) = rt.edit.as_mut() {
-                    e.lines = vec![String::new()];
-                    e.line = 0;
-                    e.col = 0;
-                }
-            }
-            Some(_) => {
+        v if v == VK_ESCAPE.0 as u32 => {
+            if rt.edit.is_some() {
                 rt.edit = None;
             }
-            None => {}
-        },
+        }
         v if v == VK_BACK.0 as u32 => {
             if let Some(e) = rt.edit.as_mut() {
                 e.backspace();
@@ -2333,7 +1688,6 @@ fn start_inplace_rename(rt: &mut Runtime, target: EditTarget) {
             };
             (name, fence_title_rect(rt, fence))
         }
-        _ => return,
     };
     rt.edit = Some(InlineEdit {
         target,
@@ -2377,10 +1731,6 @@ fn apply_rename(rt: &mut Runtime, target: EditTarget, new_name: &str) -> bool {
             true
         }
         EditTarget::Item { fence, icon } => commit_icon_rename(rt, fence, icon, new_name),
-        // 小组件输入/便签不走改名路径（dismiss/commit 已单独处理）
-        EditTarget::WidgetTodo { .. }
-        | EditTarget::WidgetNotes { .. }
-        | EditTarget::WidgetRename { .. } => false,
     }
 }
 
@@ -2574,18 +1924,14 @@ fn arm_anim_timer(rt: &mut Runtime) {
     if !rt.console_anim.active()
         && rt.desktop_fade.is_none()
         && rt.fence_tweens.is_empty()
-        && rt.widget_tweens.is_empty()
-        && rt.spawning_widgets.is_empty()
         && !icon_hover_active(rt)
-        && rt.widget_anims.is_empty()
-        && rt.closing_widgets.is_empty()
     {
         return;
     }
     unsafe { (*rt.overlay_ptr).set_anim_active(true) };
 }
 
-/// 推进一帧动画：面板补间 + 小组件行入场/勾选补间 + 关闭淡出清理。
+/// 推进一帧动画：面板补间 + 栅栏补间 + 图标悬停。
 /// 返回是否仍有动画在推进（否则调用方停用定时器）。
 fn advance_anim(rt: &mut Runtime) -> bool {
     let now = Instant::now();
@@ -2599,47 +1945,6 @@ fn advance_anim(rt: &mut Runtime) -> bool {
     // 栅栏拖动/缩放补间：结束即从表里摘除（视觉 = 模型）
     rt.fence_tweens
         .retain(|t| tween_progress(t.t0, t.dur, now).is_some());
-    // 小组件待办行补间；结束的行从表里摘除
-    let mut done_rows: Vec<(u64, u64)> = Vec::new();
-    for (&key, ra) in rt.widget_anims.iter_mut() {
-        if let Some(en) = ra.enter {
-            if tween_progress(en.t0, en.dur, now).is_none() {
-                ra.enter = None;
-            }
-        }
-        if let Some(tg) = ra.toggle {
-            if tween_progress(tg.t0, tg.dur, now).is_none() {
-                ra.toggle = None;
-            }
-        }
-        if ra.enter.is_none() && ra.toggle.is_none() {
-            done_rows.push(key);
-        }
-    }
-    for key in done_rows {
-        rt.widget_anims.remove(&key);
-    }
-    // 小组件拖动/缩放补间：结束即摘除（视觉 = 模型）
-    rt.widget_tweens
-        .retain(|t| tween_progress(t.t0, t.dur, now).is_some());
-    // 新建淡入：结束即摘除
-    rt.spawning_widgets
-        .retain(|c| tween_progress(c.t0, c.dur, now).is_some());
-    // 关闭中的小组件：动画结束即从模型移除并持久化
-    let mut removed = false;
-    rt.closing_widgets.retain(|c| {
-        if tween_progress(c.t0, c.dur, now).is_some() {
-            true
-        } else {
-            rt.desk.widgets.retain(|w| w.id != c.id);
-            rt.widget_scrolls.remove(&c.id);
-            removed = true;
-            false
-        }
-    });
-    if removed {
-        let _ = rt.store.save(&rt.desk);
-    }
     // 面板展开/折叠补间
     if let Some(pt) = anim.panel_tween {
         match tween_progress(pt.t0, pt.dur, now) {
@@ -2656,10 +1961,6 @@ fn advance_anim(rt: &mut Runtime) -> bool {
     anim.active()
         || rt.desktop_fade.is_some()
         || !rt.fence_tweens.is_empty()
-        || !rt.widget_tweens.is_empty()
-        || !rt.spawning_widgets.is_empty()
-        || !rt.widget_anims.is_empty()
-        || !rt.closing_widgets.is_empty()
         || icon_hover_active(rt)
 }
 
@@ -3591,13 +2892,11 @@ fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
         rt.desk.fences[i].scroll = sf.scroll;
         scene.fences.push(sf);
     }
-    // 桌面小组件（插件实例卡片）
-    for w in &rt.desk.widgets {
-        let sw = build_widget(rt, w, alpha, now);
-        scene.widgets.push(sw);
+    // 控制中心：关闭后完全不渲染（不留胶囊）；展开动画期间 panel > 0 才画。
+    let panel = rt.console_anim.panel;
+    if rt.desk.console_open || panel > 0.01 {
+        scene.console = Some(build_console(rt, &rt.console_anim));
     }
-    // 控制中心：始终在场（折叠胶囊 ⇄ 展开面板），折叠时的命中区由 hit 模型裁剪为胶囊。
-    scene.console = Some(build_console(rt, &rt.console_anim));
     // 内联编辑（最后绘制，浮于所有内容之上）
     scene.edit = rt.edit.as_ref().map(|e| SceneEdit {
         rect: e.rect,
@@ -3674,29 +2973,17 @@ fn icon_hover_active(rt: &Runtime) -> bool {
         .unwrap_or(false)
 }
 
-/// 控制中心展开后的完整高度（DIP）：取组件 / 栅栏管理 各页需要高度的最大值
-/// （所有标签页共享同一面板高度，切换标签不会跳变），并钳制在最大高度内。
+/// 控制中心展开后的完整高度（DIP）：栅栏管理页，钳制在最大高度内。
 fn console_full_height(desk: &Desk, s: f32) -> f32 {
-    let title_tab = (CONSOLE_TITLE_H + CONSOLE_TAB_H) * s;
-    let widgets_h = title_tab
-        + 8.0 * s
-        + desk.widgets.len().clamp(1, 8) as f32 * CONSOLE_WIDGET_ROW_H * s
-        + 8.0 * s
-        + CONSOLE_ADD_BTN_H * s
-        + 6.0 * s
-        + CONSOLE_ADD_BTN_H * s
-        + 12.0 * s;
-    let fences_h = title_tab
+    let title_h = CONSOLE_TITLE_H * s;
+    title_h
         + 8.0 * s
         + desk.fences.len().min(CONSOLE_FENCE_MAX_ROWS) as f32 * CONSOLE_FENCE_ROW_H * s
         + 8.0 * s
         + CONSOLE_FENCE_DETAIL_H * s
         + 8.0 * s
         + CONSOLE_ADD_BTN_H * s
-        + 12.0 * s;
-    widgets_h
-        .max(fences_h)
-        .clamp(CONSOLE_MIN_H * s, CONSOLE_MAX_H * s)
+        + 12.0 * s.clamp(CONSOLE_MIN_H * s, CONSOLE_MAX_H * s)
 }
 
 /// 控制中心面板矩形（物理像素，虚拟屏幕坐标）。
@@ -3715,9 +3002,8 @@ fn console_geometry(desk: &Desk, theme: &Theme, vw: f32, _vh: f32, panel: f32) -
         Some((w, h)) => (w.max(CONSOLE_MIN_W * s), h.max(CONSOLE_MIN_H * s)),
         None => (CONSOLE_W * s, auto_full_h),
     };
-    let pill_h = CONSOLE_PILL_H * s;
     // 允许小幅过冲（展开回弹），1.12 上限避免面板瞬时过高
-    let h = pill_h + (full_h - pill_h) * panel.clamp(0.0, 1.12);
+    let h = full_h * panel.clamp(0.0, 1.12);
     let (x, y) = match desk.console_pos {
         Some(p) => (p.x, p.y),
         None => (
@@ -3728,36 +3014,15 @@ fn console_geometry(desk: &Desk, theme: &Theme, vw: f32, _vh: f32, panel: f32) -
     RectF { x, y, w, h }
 }
 
-/// 构建控制中心面板场景（组件 / 栅栏管理 两个标签页）。面板始终在场：
-/// 折叠胶囊（panel<0.5）⇄ 展开面板（panel≥0.5），高度按 `anim.panel` 插值。
+/// 构建控制中心面板场景（栅栏管理单页）。关闭后完全隐藏（无胶囊），
+/// 高度按 `anim.panel` 从 0 插值到完整面板。
 fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
     let desk = &rt.desk;
     let theme = &rt.theme;
     let s = theme.scale;
     let panel = console_geometry(desk, theme, rt.vw, rt.vh, anim.panel);
     let title_h = CONSOLE_TITLE_H * s;
-    let tab_h = CONSOLE_TAB_H * s;
-    let content_top = panel.y + title_h + tab_h;
-
-    // —— 标签栏（组件 → 栅栏管理）——
-    let order = console_tab_order(rt);
-    let active_tab = rt.console_tab.min(order.len().saturating_sub(1));
-    let active_kind = order[active_tab];
-    let tab_w = (panel.w - 2.0 * CONSOLE_PAD * s) / order.len().max(1) as f32;
-    let tabs: Vec<SceneTab> = order
-        .iter()
-        .enumerate()
-        .map(|(i, t)| SceneTab {
-            rect: RectF {
-                x: panel.x + CONSOLE_PAD * s + i as f32 * tab_w,
-                y: panel.y + title_h,
-                w: tab_w,
-                h: tab_h,
-            },
-            label: t.label().to_string(),
-            active: i == active_tab,
-        })
-        .collect();
+    let content_top = panel.y + title_h;
 
     // —— 标题栏：关闭 + 切换桌面 ——
     let close = RectF {
@@ -3772,39 +3037,6 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         y: panel.y + (title_h - toggle_h) / 2.0,
         w: CONSOLE_TOGGLE_W * s,
         h: toggle_h,
-    };
-
-    // —— 组件页：已添加的小组件列表 + 添加按钮 ——
-    let widget_rows: Vec<SceneWidgetRow> = desk
-        .widgets
-        .iter()
-        .enumerate()
-        .take(8)
-        .map(|(i, w)| SceneWidgetRow {
-            rect: RectF {
-                x: panel.x + CONSOLE_PAD * s,
-                y: content_top + 8.0 * s + i as f32 * CONSOLE_WIDGET_ROW_H * s,
-                w: panel.w - 2.0 * CONSOLE_PAD * s,
-                h: CONSOLE_WIDGET_ROW_H * s,
-            },
-            title: w.title.clone(),
-            kind_label: w.kind.label().to_string(),
-        })
-        .collect();
-    // 添加按钮紧跟已添加列表之后（按实际数量排布，避免被面板高度裁掉）
-    let rows_shown = desk.widgets.len().min(8);
-    let add_y = content_top + 8.0 * s + rows_shown as f32 * CONSOLE_WIDGET_ROW_H * s;
-    let add_todo = RectF {
-        x: panel.x + CONSOLE_PAD * s,
-        y: add_y,
-        w: (panel.w - 2.0 * CONSOLE_PAD * s - 8.0 * s) / 2.0,
-        h: CONSOLE_ADD_BTN_H * s,
-    };
-    let add_notes = RectF {
-        x: add_todo.x + add_todo.w + 8.0 * s,
-        y: add_y,
-        w: add_todo.w,
-        h: CONSOLE_ADD_BTN_H * s,
     };
 
     // —— 栅栏管理页 ——
@@ -3964,15 +3196,8 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         width: panel.w,
         height: panel.h,
         title_h,
-        tab_h,
-        tabs,
-        active_tab,
-        active_kind,
         close,
         desktop_toggle,
-        widget_rows,
-        add_todo,
-        add_notes,
         fence_rows,
         fence_list_view,
         fence_detail,
@@ -3980,7 +3205,6 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         fill_color: [0.062, 0.086, 0.133, 0.92],
         border_color: [1.0, 1.0, 1.0, 0.18],
         panel: anim.panel,
-        count: desk.widgets.len(),
         hover_zone: if anim.panel >= 0.5 {
             rt.console_hover
         } else {
@@ -3991,158 +3215,6 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
 }
 
 /// 构建一个桌面小组件的场景（待办/便签卡片；位置尺寸 = DIP × scale）。
-fn build_widget(rt: &Runtime, w: &WidgetInstance, alpha: f32, now: Instant) -> SceneWidget {
-    let s = rt.theme.scale;
-    // 关闭中的小组件淡出
-    let mut alpha = match rt.closing_widgets.iter().find(|c| c.id == w.id) {
-        Some(c) => match tween_progress(c.t0, c.dur, now) {
-            Some(p) => alpha * (1.0 - ease_out_cubic(p)),
-            None => 0.0,
-        },
-        None => alpha,
-    };
-    // 新建中的小组件淡入
-    if let Some(c) = rt.spawning_widgets.iter().find(|c| c.id == w.id) {
-        match tween_progress(c.t0, c.dur, now) {
-            Some(p) => alpha *= ease_out_cubic(p),
-            None => alpha = 0.0,
-        }
-    }
-    // 拖动/缩放补间：视觉矩形（DIP）
-    let visual = widget_visual_rect(rt, w.id);
-    let x = visual.x * s;
-    let y = visual.y * s;
-    let width = visual.w * s;
-    let height = visual.h * s;
-    let hover_zone = rt
-        .widget_hover
-        .filter(|(id, _)| *id == w.id)
-        .and_then(|(_, z)| z);
-    let mut sw = SceneWidget {
-        id: w.id,
-        x,
-        y,
-        width,
-        height,
-        title: w.title.clone(),
-        kind: w.kind,
-        alpha,
-        fill_color: [0.06, 0.09, 0.14, 0.94],
-        border_color: [1.0, 1.0, 1.0, 0.18],
-        title_rect: RectF {
-            x,
-            y,
-            w: width,
-            h: WIDGET_TITLE_H * s,
-        },
-        close: RectF {
-            x: x + width - 30.0 * s,
-            y: y + 5.0 * s,
-            w: 24.0 * s,
-            h: 24.0 * s,
-        },
-        grip: RectF {
-            x: x + width - GRIP_SIZE,
-            y: y + height - GRIP_SIZE,
-            w: GRIP_SIZE,
-            h: GRIP_SIZE,
-        },
-        checkbox: Vec::new(),
-        del: Vec::new(),
-        rows: Vec::new(),
-        input: RectF::default(),
-        add: RectF::default(),
-        list_top: 0.0,
-        row_h: WIDGET_ROW_H * s,
-        scroll: 0.0,
-        scroll_max: 0.0,
-        list_view: RectF::default(),
-        notes_text: String::new(),
-        notes_rect: RectF::default(),
-        hover_zone,
-    };
-    match w.kind {
-        WidgetKind::Todo => {
-            let input = widget_input_rect(rt, w);
-            sw.input = RectF {
-                x: input.x,
-                y: input.y,
-                w: input.w - 36.0 * s,
-                h: input.h,
-            };
-            sw.add = RectF {
-                x: input.x + input.w - 30.0 * s,
-                y: input.y,
-                w: 30.0 * s,
-                h: input.h,
-            };
-            let row_h = WIDGET_ROW_H * s;
-            let list_top = input.y + input.h + WIDGET_PAD * s;
-            let max = widget_scroll_max(rt, w.id);
-            let scroll = rt
-                .widget_scrolls
-                .get(&w.id)
-                .copied()
-                .unwrap_or(0.0)
-                .min(max);
-            sw.list_top = list_top;
-            sw.scroll = scroll;
-            sw.scroll_max = max;
-            let shown = widget_visible_rows(rt, w);
-            sw.list_view = RectF {
-                x: input.x,
-                y: list_top,
-                w: width - 2.0 * WIDGET_PAD * s,
-                h: shown as f32 * row_h,
-            };
-            if let Some(t) = w.todo() {
-                let box_s = (16.0 * s).min(sw.input.h);
-                for (i, item) in t.items.iter().take(shown + 1).enumerate() {
-                    let ry = list_top + i as f32 * row_h - scroll;
-                    sw.checkbox.push(RectF {
-                        x: sw.input.x,
-                        y: ry + (row_h - box_s) / 2.0,
-                        w: box_s,
-                        h: box_s,
-                    });
-                    sw.del.push(RectF {
-                        x: x + width - WIDGET_PAD * s - 22.0 * s,
-                        y: ry + (row_h - 22.0 * s) / 2.0,
-                        w: 22.0 * s,
-                        h: 22.0 * s,
-                    });
-                    let mut alpha_row = 1.0f32;
-                    let mut done_progress = 1.0f32;
-                    if let Some(ra) = rt.widget_anims.get(&(w.id, item.id)) {
-                        if let Some(en) = ra.enter {
-                            if let Some(p) = tween_progress(en.t0, en.dur, now) {
-                                alpha_row = ease_out_back(p);
-                            }
-                        }
-                        if let Some(tg) = ra.toggle {
-                            if let Some(p) = tween_progress(tg.t0, tg.dur, now) {
-                                done_progress = ease_out_cubic(p);
-                            }
-                        }
-                    }
-                    sw.rows.push(SceneTodoRow {
-                        name: item.name.clone(),
-                        detail: item.detail.clone(),
-                        done: item.done,
-                        alpha: alpha_row.clamp(0.0, 1.0),
-                        done_progress,
-                    });
-                }
-            }
-        }
-        WidgetKind::Notes => {
-            let notes_rect = widget_notes_rect(rt, w);
-            sw.notes_rect = notes_rect;
-            sw.notes_text = w.notes_text().to_string();
-        }
-    }
-    sw
-}
 /// 列表布局详情列的固定宽度与间距（物理像素）。
 const LIST_TYPE_W: f32 = 90.0;
 const LIST_MOD_W: f32 = 140.0;
@@ -4488,50 +3560,8 @@ fn hit_model_from(theme: &Theme, scene: &Scene, _desk: &Desk) -> HitModel {
             });
         }
     }
-    // 桌面小组件命中（与绘制几何同源）：关闭/缩放/标题拖动/勾选/删除/输入/便签
-    let mut widgets = Vec::with_capacity(scene.widgets.len());
-    for w in &scene.widgets {
-        if w.alpha <= 0.01 {
-            continue;
-        }
-        let mut zones = Vec::new();
-        zones.push((WidgetZone::Close, w.close));
-        zones.push((WidgetZone::Grip, w.grip));
-        match w.kind {
-            sylva_core::model::WidgetKind::Todo => {
-                zones.push((WidgetZone::Input, w.input));
-                zones.push((WidgetZone::Add, w.add));
-                for (i, r) in w.checkbox.iter().enumerate() {
-                    if r.y + r.h < w.list_view.y || r.y > w.list_view.y + w.list_view.h {
-                        continue;
-                    }
-                    zones.push((WidgetZone::Toggle(i), *r));
-                }
-                for (i, r) in w.del.iter().enumerate() {
-                    if r.y + r.h < w.list_view.y || r.y > w.list_view.y + w.list_view.h {
-                        continue;
-                    }
-                    zones.push((WidgetZone::Delete(i), *r));
-                }
-            }
-            sylva_core::model::WidgetKind::Notes => {
-                zones.push((WidgetZone::Notes, w.notes_rect));
-            }
-        }
-        zones.push((WidgetZone::Title, w.title_rect));
-        widgets.push(WidgetHit {
-            rect: RectF {
-                x: w.x,
-                y: w.y,
-                w: w.width,
-                h: w.height,
-            },
-            id: w.id,
-            zones,
-        });
-    }
-    // 控制中心命中（与绘制几何同源）。折叠胶囊（panel<0.5）：整块胶囊 = 展开按钮；
-    // 展开面板：标签页 / 关闭 / 切换桌面 / 各页控件。
+    // 控制中心命中（与绘制几何同源）。关闭/淡出中（panel < 0.5）不接收点击；
+    // 展开面板：关闭 / 切换桌面 / 栅栏列表 / 详情控制 / 添加 / 移出。
     let mut console = None;
     if let Some(c) = &scene.console {
         let mut zones = Vec::new();
@@ -4541,50 +3571,36 @@ fn hit_model_from(theme: &Theme, scene: &Scene, _desk: &Desk) -> HitModel {
             w: c.width,
             h: c.height,
         };
-        if c.panel < 0.5 {
-            // 折叠：点击胶囊任意处展开（标题栏拖动在展开形态才生效）
-            zones.push((ConsoleZone::Expand, body));
-        } else {
-            for (i, t) in c.tabs.iter().enumerate() {
-                zones.push((ConsoleZone::Tab(i), t.rect));
-            }
+        if c.panel >= 0.5 {
             zones.push((ConsoleZone::Close, c.close));
             zones.push((ConsoleZone::DesktopToggle, c.desktop_toggle));
-            match c.active_kind {
-                ConsoleTab::Widgets => {
-                    zones.push((ConsoleZone::AddWidget(WidgetKind::Todo), c.add_todo));
-                    zones.push((ConsoleZone::AddWidget(WidgetKind::Notes), c.add_notes));
+            zones.push((ConsoleZone::AddFence, c.add_fence));
+            for (i, r) in c.fence_rows.iter().enumerate() {
+                // 滚出可视区的行不参与命中（避免点到详情区时误中隐藏行）
+                if r.rect.y + r.rect.h < c.fence_list_view.y
+                    || r.rect.y > c.fence_list_view.y + c.fence_list_view.h
+                {
+                    continue;
                 }
-                ConsoleTab::Fences => {
-                    zones.push((ConsoleZone::AddFence, c.add_fence));
-                    for (i, r) in c.fence_rows.iter().enumerate() {
-                        // 滚出可视区的行不参与命中（避免点到详情区时误中隐藏行）
-                        if r.rect.y + r.rect.h < c.fence_list_view.y
-                            || r.rect.y > c.fence_list_view.y + c.fence_list_view.h
-                        {
-                            continue;
-                        }
-                        zones.push((ConsoleZone::FenceSelect(i), r.rect));
-                    }
-                    if let Some(d) = &c.fence_detail {
-                        zones.push((ConsoleZone::RemoveFence, d.remove_btn));
-                        zones.push((ConsoleZone::FenceLayout(FenceLayout::Grid), d.layout_grid));
-                        zones.push((ConsoleZone::FenceLayout(FenceLayout::List), d.layout_list));
-                        zones.push((ConsoleZone::FenceIconSize(32.0), d.size_s));
-                        zones.push((ConsoleZone::FenceIconSize(48.0), d.size_m));
-                        zones.push((ConsoleZone::FenceIconSize(64.0), d.size_l));
-                        zones.push((ConsoleZone::FenceStyle(FenceStyle::Glass), d.style_glass));
-                        zones.push((
-                            ConsoleZone::FenceStyle(FenceStyle::Outline),
-                            d.style_outline,
-                        ));
-                        zones.push((ConsoleZone::FenceStyle(FenceStyle::Filled), d.style_filled));
-                        zones.push((ConsoleZone::FenceTint(None), d.tint_default));
-                        for (i, r) in d.tints.iter().enumerate() {
-                            if let Some((_, c)) = TINT_PRESETS.get(i) {
-                                zones.push((ConsoleZone::FenceTint(Some(*c)), *r));
-                            }
-                        }
+                zones.push((ConsoleZone::FenceSelect(i), r.rect));
+            }
+            if let Some(d) = &c.fence_detail {
+                zones.push((ConsoleZone::RemoveFence, d.remove_btn));
+                zones.push((ConsoleZone::FenceLayout(FenceLayout::Grid), d.layout_grid));
+                zones.push((ConsoleZone::FenceLayout(FenceLayout::List), d.layout_list));
+                zones.push((ConsoleZone::FenceIconSize(32.0), d.size_s));
+                zones.push((ConsoleZone::FenceIconSize(48.0), d.size_m));
+                zones.push((ConsoleZone::FenceIconSize(64.0), d.size_l));
+                zones.push((ConsoleZone::FenceStyle(FenceStyle::Glass), d.style_glass));
+                zones.push((
+                    ConsoleZone::FenceStyle(FenceStyle::Outline),
+                    d.style_outline,
+                ));
+                zones.push((ConsoleZone::FenceStyle(FenceStyle::Filled), d.style_filled));
+                zones.push((ConsoleZone::FenceTint(None), d.tint_default));
+                for (i, r) in d.tints.iter().enumerate() {
+                    if let Some((_, c)) = TINT_PRESETS.get(i) {
+                        zones.push((ConsoleZone::FenceTint(Some(*c)), *r));
                     }
                 }
             }
@@ -4603,7 +3619,6 @@ fn hit_model_from(theme: &Theme, scene: &Scene, _desk: &Desk) -> HitModel {
     HitModel {
         fences,
         icons,
-        widgets,
         console,
     }
 }

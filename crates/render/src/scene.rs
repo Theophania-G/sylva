@@ -2,9 +2,9 @@
 //!
 //! 坐标全部为**物理像素**（虚拟屏幕坐标），与 overlay 窗口客户端坐标一致。
 
-use sylva_core::model::{FenceLayout, FenceStyle, WidgetKind};
+use sylva_core::model::{FenceLayout, FenceStyle};
 
-use crate::overlay::{ConsoleZone, RectF, WidgetZone};
+use crate::overlay::{ConsoleZone, RectF};
 
 /// 栅栏内的一个图标（位置由 App 层按主题网格/列表排布后填入）。
 #[derive(Debug, Clone)]
@@ -109,34 +109,6 @@ pub struct SceneTodo {
     pub row_h: f32,
 }
 
-/// 控制中心标签页。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConsoleTab {
-    /// 桌面组件（小组件列表 + 添加新组件）。
-    Widgets,
-    /// 栅栏管理。
-    Fences,
-}
-
-impl ConsoleTab {
-    pub const ALL: [ConsoleTab; 2] = [ConsoleTab::Widgets, ConsoleTab::Fences];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ConsoleTab::Widgets => "组件",
-            ConsoleTab::Fences => "栅栏",
-        }
-    }
-}
-
-/// 标签页几何。
-#[derive(Debug, Clone)]
-pub struct SceneTab {
-    pub rect: RectF,
-    pub label: String,
-    pub active: bool,
-}
-
 /// 栅栏管理页：可点选的一行（选中后在下方详情区显示控制项）。
 #[derive(Debug, Clone)]
 pub struct SceneFenceRow {
@@ -173,15 +145,7 @@ pub struct SceneFenceDetail {
     pub remove_btn: RectF,
 }
 
-/// 组件页：一行（小组件名称 + 种类）。
-#[derive(Debug, Clone)]
-pub struct SceneWidgetRow {
-    pub rect: RectF,
-    pub title: String,
-    pub kind_label: String,
-}
-
-/// 控制台面板（控制中心：组件 / 栅栏管理 两个标签页）。
+/// 控制台面板（控制中心：栅栏管理）。
 ///
 /// 几何字段同时供绘制（draw_console）与命中模型（hit_model_from）使用，
 /// 保证点击区域与视觉一致。
@@ -193,23 +157,10 @@ pub struct SceneConsole {
     pub height: f32,
     /// 标题栏高（拖动把手；关闭按钮与桌面切换按钮位于其内）。
     pub title_h: f32,
-    /// 标签栏高。
-    pub tab_h: f32,
-    pub tabs: Vec<SceneTab>,
-    /// 当前标签页下标（与 `tabs` 平行）。
-    pub active_tab: usize,
-    /// 当前标签页类型（App 层路由事件用；比下标稳定，便签启用与否都会变）。
-    pub active_kind: ConsoleTab,
     /// 关闭按钮矩形（标题栏右上）。
     pub close: RectF,
     /// 「切换桌面」按钮矩形（标题栏，关闭按钮左侧）。
     pub desktop_toggle: RectF,
-    /// 组件页：小组件列表（与 `desk.widgets` 平行）。
-    pub widget_rows: Vec<SceneWidgetRow>,
-    /// 组件页：「添加待办事项」按钮。
-    pub add_todo: RectF,
-    /// 组件页：「添加便签」按钮。
-    pub add_notes: RectF,
     /// 栅栏管理页：可点选栅栏行（与 `desk.fences` 平行）。
     pub fence_rows: Vec<SceneFenceRow>,
     /// 栅栏管理页：列表可视区（行超出部分被裁剪，命中模型据此跳过不可见行）。
@@ -222,56 +173,10 @@ pub struct SceneConsole {
     pub border_color: [f32; 4],
     /// 面板展开进度 0..1（0=折叠胶囊，1=完整面板）。
     pub panel: f32,
-    /// 小组件总数（折叠胶囊的角标显示）。
-    pub count: usize,
     /// 当前悬停的控制台控件（App 层经 ConsoleHover 事件写入；绘制高亮用）。
     pub hover_zone: Option<ConsoleZone>,
     /// 是否处于原始桌面模式（标题栏按钮文案与状态）。
     pub desktop_mode: bool,
-}
-
-/// 桌面小组件（插件实例卡片）：待办 / 便签，可拖拽移动、边缘缩放、独立数据。
-#[derive(Debug, Clone)]
-pub struct SceneWidget {
-    pub id: u64,
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-    pub title: String,
-    pub kind: WidgetKind,
-    /// 整体透明度（添加淡入 / 关闭淡出 / 桌面切换）。
-    pub alpha: f32,
-    pub fill_color: [f32; 4],
-    pub border_color: [f32; 4],
-    /// 标题栏（拖动把手）。
-    pub title_rect: RectF,
-    /// 关闭按钮（✕）。
-    pub close: RectF,
-    /// 右下角缩放把手。
-    pub grip: RectF,
-    /// 待办页：每行勾选框（与 `rows` 平行）。
-    pub checkbox: Vec<RectF>,
-    /// 待办页：每行删除按钮（与 `rows` 平行）。
-    pub del: Vec<RectF>,
-    pub rows: Vec<SceneTodoRow>,
-    /// 待办页：添加输入行（D2D 内联编辑）。
-    pub input: RectF,
-    /// 待办页：「＋」添加按钮。
-    pub add: RectF,
-    /// 待办列表首行 y、行高、滚动偏移与最大滚动量。
-    pub list_top: f32,
-    pub row_h: f32,
-    pub scroll: f32,
-    pub scroll_max: f32,
-    /// 待办列表可视区（命中模型据此跳过滚出可视区的行）。
-    pub list_view: RectF,
-    /// 便签：文本（由内联编辑绘制）。
-    pub notes_text: String,
-    /// 便签：正文区（点击聚焦编辑）。
-    pub notes_rect: RectF,
-    /// 当前悬停的小组件控件（App 层写入）。
-    pub hover_zone: Option<WidgetZone>,
 }
 
 /// 内联文本编辑的渲染数据（App 层 InlineEdit 的只读快照，绘制用）。
@@ -288,12 +193,6 @@ pub struct SceneEdit {
     pub comp: String,
 }
 
-impl SceneWidget {
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px <= self.x + self.width && py >= self.y && py <= self.y + self.height
-    }
-}
-
 /// 整屏场景（虚拟屏幕）。
 #[derive(Debug, Default)]
 pub struct Scene {
@@ -301,8 +200,6 @@ pub struct Scene {
     pub width: f32,
     pub height: f32,
     pub fences: Vec<SceneFence>,
-    /// 桌面小组件（插件实例）。
-    pub widgets: Vec<SceneWidget>,
     /// 当前激活的内联文本编辑（None = 无）。
     pub edit: Option<SceneEdit>,
     /// 控制台面板（插件宿主）；None = 本帧不画。
@@ -315,7 +212,6 @@ impl Scene {
             width,
             height,
             fences: Vec::new(),
-            widgets: Vec::new(),
             edit: None,
             console: None,
         }
@@ -335,13 +231,6 @@ impl Scene {
             min_y = min_y.min(f.y);
             max_x = max_x.max(f.x + f.width);
             max_y = max_y.max(f.y + f.height);
-            any = true;
-        }
-        for w in &self.widgets {
-            min_x = min_x.min(w.x);
-            min_y = min_y.min(w.y);
-            max_x = max_x.max(w.x + w.width);
-            max_y = max_y.max(w.y + w.height);
             any = true;
         }
         if let Some(c) = &self.console {
