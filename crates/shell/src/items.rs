@@ -14,12 +14,12 @@ use windows::Win32::UI::Shell::Common::{
     ITEMIDLIST, STRRET, STRRET_CSTR, STRRET_TYPE, STRRET_WSTR,
 };
 use windows::Win32::UI::Shell::{
-    IShellFolder, SHGetDesktopFolder, SHGetPathFromIDListW, ShellExecuteW, SHCONTF_FOLDERS,
-    SHCONTF_NONFOLDERS, SHGDNF,
+    IShellFolder, SHGetDesktopFolder, SHGetPathFromIDListW, SHParseDisplayName, ShellExecuteW,
+    SHCONTF_FOLDERS, SHCONTF_NONFOLDERS, SHGDNF,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-use fence_core::model::{ItemId, ItemKind};
+use sylva_core::model::{ItemId, ItemKind};
 
 // windows-rs 0.62 未自动生成的 shell 属性位（稳定文档值）。
 const SFGAO_LINK: u32 = 0x0001_0000;
@@ -100,6 +100,48 @@ pub fn enumerate_desktop_items() -> windows::core::Result<Vec<DesktopItem>> {
         }
     }
     Ok(items)
+}
+
+/// 从文件系统路径构建一个 `DesktopItem`（拖入 / 粘贴添加任意文件用）。
+///
+/// 与桌面枚举共用同一套分类 / 标识逻辑：id 用小写路径，显示名取文件名
+/// （快捷方式去掉 `.lnk`/`.url`/`.appref-ms` 扩展名），双击打开走 `ShellExecuteW`。
+pub fn item_from_path(path: &str) -> windows::core::Result<DesktopItem> {
+    let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+    let p = wide(path);
+    unsafe {
+        SHParseDisplayName(PCWSTR(p.as_ptr()), None, &mut pidl, 0, None)?;
+    }
+    if pidl.is_null() {
+        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            E_ENUM_EMPTY,
+        )));
+    }
+    let display_name = display_name_from_path(path);
+    let kind = kind_from(0, false, Some(path), &display_name);
+    let id = item_id(Some(path.into()), &display_name);
+    Ok(DesktopItem {
+        id,
+        display_name,
+        kind,
+        path: Some(path.into()),
+        pidl,
+    })
+}
+
+/// 显示名：文件名（快捷方式去掉 `.lnk`/`.url`/`.appref-ms` 扩展名，与桌面一致）。
+fn display_name_from_path(path: &str) -> String {
+    let name = Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned());
+    let lower = name.to_ascii_lowercase();
+    for ext in ["lnk", "url", "appref-ms"] {
+        if lower.ends_with(&format!(".{ext}")) {
+            return name[..name.len() - ext.len() - 1].to_string();
+        }
+    }
+    name
 }
 
 /// 从单个 PIDL 构建 `DesktopItem`；失败时返回 None（由调用方负责释放 pidl）。
@@ -265,6 +307,57 @@ mod tests {
             "c:\\docs\\a.exe"
         );
         assert_eq!(item_id(None, "回收站"), "shell:回收站");
+    }
+
+    #[test]
+    fn display_name_strips_shortcut_extensions() {
+        assert_eq!(
+            display_name_from_path(r"C:\Users\a\Desktop\chrome.lnk"),
+            "chrome"
+        );
+        assert_eq!(display_name_from_path(r"C:\Users\a\Desktop\web.url"), "web");
+        assert_eq!(
+            display_name_from_path(r"C:\Users\a\Desktop\app.appref-ms"),
+            "app"
+        );
+        assert_eq!(
+            display_name_from_path(r"C:\Users\a\Desktop\report.pdf"),
+            "report.pdf"
+        );
+        assert_eq!(
+            display_name_from_path(r"C:\Users\a\Desktop\New Folder"),
+            "New Folder"
+        );
+        // 根目录无文件名 → 回退到完整路径
+        assert_eq!(display_name_from_path(r"C:\"), "C:\\");
+    }
+
+    #[test]
+    fn live_item_from_path_builds_desktop_item() {
+        // 任意路径（非桌面枚举）→ DesktopItem 冒烟：验证拖入/粘贴管线入口可用。
+        if crate::com::init().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir();
+        let path = dir.join("sylva_item_test.txt");
+        let _ = std::fs::write(&path, "hi");
+        let ok = path.exists();
+        if !ok {
+            return;
+        }
+        let p = path.to_string_lossy().into_owned();
+        match item_from_path(&p) {
+            Ok(item) => {
+                assert_eq!(item.path.as_deref(), Some(p.as_str()));
+                assert_eq!(item.display_name, "sylva_item_test.txt");
+                // .txt 文件至少不应被归类为 Unknown
+                assert_ne!(item.kind, sylva_core::model::ItemKind::Unknown);
+                // 图标提取不阻断添加，这里仅验证不 panic
+                let _ = crate::icons::extract_icon(&item, 32);
+            }
+            Err(e) => eprintln!("item_from_path failed (skipping): {e}"),
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

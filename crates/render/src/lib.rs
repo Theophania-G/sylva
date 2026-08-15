@@ -1,4 +1,4 @@
-//! `fence-render`：渲染层。
+//! `sylva-render`：渲染层。
 //!
 //! 负责桌面 overlay 窗口与 DirectComposition / Direct2D / DirectWrite 绘制：
 //! - `device`：D3D11 + DXGI + DComp + D2D/DWrite 工厂（GPU 上下文）
@@ -30,9 +30,12 @@ pub use compositor::Compositor;
 pub use device::RenderDevice;
 pub use draw::{draw_scene, IconStore, TextFormats};
 pub use overlay::{
-    run_message_loop, ConsoleAction, ConsoleHit, FenceHit, HitModel, IconHit, OverlayEvent,
-    OverlayWindow, RectF, GRIP_SIZE, WM_APP_QUIT,
+    run_message_loop, ConsoleHit, ConsoleZone, FenceHit, HitModel, IconHit, OverlayEvent,
+    OverlayWindow, RectF, ResizeZone, GRIP_SIZE, WM_APP_QUIT, WM_SYLVA_INJECT,
 };
-pub use scene::{ConsoleButton, ConsoleRow, Scene, SceneConsole, SceneFence, SceneIcon};
+pub use scene::{
+    ConsoleTab, ListColumns, Scene, SceneConsole, SceneFence, SceneFenceDetail, SceneFenceRow,
+    SceneIcon, SceneNotes, ScenePluginRow, SceneTab, SceneTodo, SceneTodoRow,
+};
 pub use surface::{CompositionSurface, Frame};
 pub use theme::Theme;

@@ -9,7 +9,7 @@
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 
-use fence_core::event::CoreEvent;
+use sylva_core::event::CoreEvent;
 
 /// 应用级事件。后续里程碑加入 Shell/Render/UI 事件变体。
 #[derive(Debug, Clone, PartialEq)]

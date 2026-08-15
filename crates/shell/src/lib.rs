@@ -1,4 +1,4 @@
-//! `fence-shell`：Windows 壳层适配层。
+//! `sylva-shell`：Windows 壳层适配层。
 //!
 //! 负责与 Windows 桌面 Shell 交互：
 //! - `takeover`：接管桌面图标层（Progman / WorkerW / SHELLDLL_DefView 探测、隐藏/恢复真实图标视图）
@@ -7,7 +7,7 @@
 //! - M2：右键菜单（`IContextMenu`）、拖拽（`IDropTarget` / `SHDoDragDrop`）
 //! - Shell 事件（`SHChangeNotify`）、多显示器 / DPI
 //!
-//! 本 crate 是分层架构中最贴近系统的一层，API 以 `fence-core` 的领域类型为边界。
+//! 本 crate 是分层架构中最贴近系统的一层，API 以 `sylva-core` 的领域类型为边界。
 
 #![allow(dead_code)] // 骨架阶段；随里程碑推进逐步移除
 
@@ -15,6 +15,7 @@ pub mod com;
 pub mod icons;
 pub mod items;
 pub mod takeover;
+pub mod time;
 
 /// 顶层便捷函数：探测桌面根窗口 `Progman`。
 pub fn probe_progman() -> Option<windows::Win32::Foundation::HWND> {

@@ -1,7 +1,7 @@
 //! 领域模型：桌面、栅栏、图标等核心类型。
 //!
 //! 本模块只包含纯数据定义与默认值，不含任何平台相关逻辑，
-//! 以便 `fence-core` 保持零 Win32 依赖、可完全单元测试。
+//! 以便 `sylva-core` 保持零 Win32 依赖、可完全单元测试。
 
 use serde::{Deserialize, Serialize};
 
@@ -88,33 +88,54 @@ pub enum FenceState {
     Folded,
 }
 
-/// 栅栏的窗口模式（决定背景填充与描边风格）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// 栅栏背景风格（决定背景填充与不透明度）。
+///
+/// v3 起替代「透明度滑块」：栅栏背景只分三种固定风格，不再用 0..1 滑块细调。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FenceStyle {
-    /// 半透明填充 + 细边框（默认）。
+    /// 颜色：不透明纯色填充（色调来自「背景色调」；未选时用默认背景色）。
     Filled,
-    /// 内部完全透明，仅中粗圆角描边。
+    /// 透明：内部完全透明，仅保留圆角描边。
     Outline,
-    /// 极浅填充（接近透明的玻璃感）+ 细边框。
+    /// 玻璃：默认半透明玻璃感（可叠加「背景色调」着色，45% 混合）。
+    #[default]
     Glass,
 }
 
 impl FenceStyle {
-    /// 控制台显示名。
+    /// 菜单/设置显示名。
     pub fn label(&self) -> &'static str {
         match self {
-            FenceStyle::Filled => "填充",
-            FenceStyle::Outline => "描边",
+            FenceStyle::Filled => "颜色",
+            FenceStyle::Outline => "透明",
             FenceStyle::Glass => "玻璃",
         }
     }
+}
 
-    /// 循环切换到下一个模式。
+/// 栅栏的布局格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FenceLayout {
+    /// 网格：图标自左向右、自上而下按列排布，标签在图标下方。
+    Grid,
+    /// 列表：图标单列纵向排布，标签在图标右侧。
+    List,
+}
+
+impl FenceLayout {
+    /// 控制台/菜单显示名。
+    pub fn label(&self) -> &'static str {
+        match self {
+            FenceLayout::Grid => "网格",
+            FenceLayout::List => "列表",
+        }
+    }
+
+    /// 循环切换到下一个格式。
     pub fn next(self) -> Self {
         match self {
-            FenceStyle::Filled => FenceStyle::Outline,
-            FenceStyle::Outline => FenceStyle::Glass,
-            FenceStyle::Glass => FenceStyle::Filled,
+            FenceLayout::Grid => FenceLayout::List,
+            FenceLayout::List => FenceLayout::Grid,
         }
     }
 }
@@ -140,10 +161,32 @@ pub struct FenceAppearance {
     pub icon_size: f32,
     /// 图标间距（逻辑 px）。
     pub gap: f32,
-    /// 窗口模式（填充 / 描边 / 玻璃）。
-    pub style: FenceStyle,
+    /// 布局格式（网格 / 列表）。
+    pub layout: FenceLayout,
+    /// 背景风格（玻璃 / 透明 / 颜色）。v3 起替代透明度滑块，决定填充与不透明度。
+    #[serde(default = "default_bg_style")]
+    pub bg_style: FenceStyle,
     /// 边框描边宽度（逻辑 px；描边模式用中粗线）。
     pub border_width: f32,
+    /// 栅栏背景不透明度（0.0=完全透明，1.0=不透明；滑块调节）。
+    ///
+    /// v3 起滑块移除，「风格」取代它；字段保留仅供旧配置反序列化兼容，渲染不再读取。
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+    /// 背景色调（RGB 0.0..=1.0）：None = 默认底色；Some = 着色。
+    /// 「玻璃」风格下 45% 向色调靠拢；「颜色」风格下作为纯色填充。
+    #[serde(default)]
+    pub tint: Option<[f32; 3]>,
+}
+
+/// `bg_style` 未持久化时的默认值：玻璃（保持旧版滑块默认的半透明观感）。
+fn default_bg_style() -> FenceStyle {
+    FenceStyle::Glass
+}
+
+/// `opacity` 未持久化时的默认值（与旧版 `bg_color` 的 alpha 一致，迁移平滑）。
+fn default_opacity() -> f32 {
+    0.55
 }
 
 impl Default for FenceAppearance {
@@ -156,8 +199,11 @@ impl Default for FenceAppearance {
             padding: 12.0,
             icon_size: 48.0,
             gap: 10.0,
-            style: FenceStyle::Filled,
-            border_width: 1.0,
+            layout: FenceLayout::Grid,
+            bg_style: FenceStyle::Glass,
+            border_width: 1.75,
+            opacity: 0.55,
+            tint: None,
         }
     }
 }
@@ -176,14 +222,50 @@ pub struct Fence {
     /// 成员顺序即布局顺序。
     pub icon_ids: Vec<ItemId>,
     pub appearance: FenceAppearance,
+    /// 内容滚动偏移（物理像素；0 = 未滚动）。内容超出可视区时用滚轮滚动。
+    #[serde(default)]
+    pub scroll: f32,
 }
 
 /// 图标元数据。核心层只关心标识与展示信息。
+///
+/// 新增字段均带 `#[serde(default)]`，保证旧版 `desk.json` 能加载。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Icon {
     pub id: ItemId,
     pub display_name: String,
     pub kind: ItemKind,
+    /// 文件系统路径；虚拟项为 None。持久化后重启可恢复图标/打开能力。
+    #[serde(default)]
+    pub path: Option<String>,
+    /// 文件类型标签（"文件夹"、"文本文档"…）；空 = 未知/虚拟项。
+    #[serde(default)]
+    pub type_label: String,
+    /// 最近修改时间（unix 秒）；无法读取为 None。
+    #[serde(default)]
+    pub modified_secs: Option<i64>,
+    /// 文件大小（字节）；文件夹/未知为 None。
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+    /// 是否为拖入/粘贴新增的项（非桌面枚举而来）。移除时直接删除，不回桌面。
+    #[serde(default)]
+    pub added: bool,
+}
+
+impl Icon {
+    /// 基础构造（详情字段留空，由 `details::enrich` 按路径补齐）。
+    pub fn new(id: ItemId, display_name: String, kind: ItemKind) -> Self {
+        Self {
+            id,
+            display_name,
+            kind,
+            path: None,
+            type_label: String::new(),
+            modified_secs: None,
+            size_bytes: None,
+            added: false,
+        }
+    }
 }
 
 /// 图标当前的归属位置。
@@ -193,6 +275,34 @@ pub enum IconLocation {
     Free,
     /// 位于指定栅栏内。
     Fence(u64),
+}
+
+/// 待办事项条目（控制台第一个插件的数据）。二级结构：名称 + 详细信息。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TodoItem {
+    /// 稳定 id（行动画/删除定位用；旧数据缺失时回退 0）。
+    #[serde(default)]
+    pub id: u64,
+    /// 事项名称（一级标题）。旧配置字段名 `text`，反序列化时兼容。
+    #[serde(alias = "text")]
+    pub name: String,
+    /// 详细信息（二级副标题）；可为空（只显示名称）。
+    #[serde(default)]
+    pub detail: String,
+    /// 是否已完成。
+    #[serde(default)]
+    pub done: bool,
+}
+
+impl TodoItem {
+    pub fn new(id: u64, name: String, detail: String) -> Self {
+        Self {
+            id,
+            name,
+            detail,
+            done: false,
+        }
+    }
 }
 
 /// 桌面全局状态，唯一的持久化根。
@@ -205,6 +315,111 @@ pub struct Desk {
     /// 未分组图标区：不属于任何栅栏的图标，顺序即布局顺序。
     pub free_icons: Vec<ItemId>,
     pub icons: HashMap<ItemId, Icon>,
+    /// 待办插件数据（控制台第一个插件）。
+    #[serde(default)]
+    pub todos: Vec<TodoItem>,
+    /// 下一个待办 id（`TodoItem.id` 分配；自增保证唯一）。
+    #[serde(default = "default_next_todo_id")]
+    pub next_todo_id: u64,
+    /// 控制台面板是否显示（右上角插件面板）。
+    /// 旧配置缺失该字段时默认打开（用户要求恢复控制台）；关闭后持久化 false。
+    #[serde(default = "default_console_open")]
+    pub console_open: bool,
+    /// 控制台面板左上角（物理像素）。None = 未拖动过，按右上角自动摆放。
+    #[serde(default)]
+    pub console_pos: Option<Vec2>,
+    /// 控制台面板宽高（物理像素）。None = 默认尺寸（宽固定，高随待办条数自适应）。
+    /// 用户拖边缘/角缩放后落为具体值；之后高度固定、超出滚动。
+    #[serde(default)]
+    pub console_size: Option<(f32, f32)>,
+    /// 插件注册表：内置插件 + 外部清单插件的统一启用状态与数据。
+    /// 旧配置缺失时默认含「待办事项」（保持既有行为）。
+    #[serde(default = "default_plugins")]
+    pub plugins: Vec<PluginEntry>,
+    /// 桌面模式：false = 栅栏接管（隐藏真实图标）；true = 原始桌面（恢复真实图标、
+    /// 栅栏淡出隐藏）。控制中心「切换桌面」按钮切换。
+    #[serde(default)]
+    pub desktop_mode: bool,
+}
+
+/// 插件种类：内置实现 / 外部清单（当前只有内置种类有界面实现）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginKind {
+    Todo,
+    Notes,
+    External,
+}
+
+impl PluginKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            PluginKind::Todo => "待办事项",
+            PluginKind::Notes => "便签",
+            PluginKind::External => "外部插件",
+        }
+    }
+}
+
+/// 插件注册项：内置插件与外部清单插件的统一持久化状态。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginEntry {
+    pub id: String,
+    pub name: String,
+    pub kind: PluginKind,
+    pub enabled: bool,
+    pub version: String,
+    pub desc: String,
+    /// 便签插件内容（多行文本，持久化）。
+    pub note_text: String,
+}
+
+impl PluginEntry {
+    pub fn builtin_todo() -> Self {
+        Self {
+            id: "todo".into(),
+            name: "待办事项".into(),
+            kind: PluginKind::Todo,
+            enabled: true,
+            version: "1.0".into(),
+            desc: "两级待办清单（名称 + 详情）".into(),
+            note_text: String::new(),
+        }
+    }
+
+    pub fn builtin_notes() -> Self {
+        Self {
+            id: "notes".into(),
+            name: "便签".into(),
+            kind: PluginKind::Notes,
+            enabled: false,
+            version: "1.0".into(),
+            desc: "随手记多行文本，自动保存".into(),
+            note_text: String::new(),
+        }
+    }
+}
+
+impl Default for PluginEntry {
+    fn default() -> Self {
+        Self::builtin_todo()
+    }
+}
+
+/// `plugins` 未持久化时（旧配置）的默认注册表：待办事项启用 + 便签未启用。
+fn default_plugins() -> Vec<PluginEntry> {
+    vec![PluginEntry::builtin_todo(), PluginEntry::builtin_notes()]
+}
+
+/// `console_open` 未持久化时（旧配置）默认打开控制台。
+fn default_console_open() -> bool {
+    true
+}
+
+/// `next_todo_id` 未持久化时（旧配置）从 1 起（0 保留给无 id 的旧数据）。
+fn default_next_todo_id() -> u64 {
+    1
 }
 
 impl Desk {
@@ -215,6 +430,14 @@ impl Desk {
             fences: Vec::new(),
             free_icons: Vec::new(),
             icons: HashMap::new(),
+            todos: Vec::new(),
+            // 首个版本默认打开控制台（用户要求恢复），关闭后持久化 false。
+            next_todo_id: 1,
+            console_open: true,
+            console_pos: None,
+            console_size: None,
+            plugins: default_plugins(),
+            desktop_mode: false,
         }
     }
 
@@ -308,11 +531,7 @@ mod tests {
     }
 
     fn icon(id: &str) -> Icon {
-        Icon {
-            id: id.to_string(),
-            display_name: id.to_string(),
-            kind: ItemKind::Unknown,
-        }
+        Icon::new(id.to_string(), id.to_string(), ItemKind::Unknown)
     }
 
     #[test]
@@ -331,6 +550,7 @@ mod tests {
             state: FenceState::Expanded,
             icon_ids: Vec::new(),
             appearance: FenceAppearance::default(),
+            scroll: 0.0,
         });
 
         // 移到栅栏
@@ -366,6 +586,7 @@ mod tests {
             state: FenceState::Expanded,
             icon_ids: vec!["a".into(), "ghost".into()],
             appearance: FenceAppearance::default(),
+            scroll: 0.0,
         });
         d.free_icons = vec!["ghost2".into()];
         d.validate();
@@ -383,18 +604,76 @@ mod tests {
     }
 
     #[test]
-    fn fence_style_cycles() {
-        assert_eq!(FenceStyle::Filled.next(), FenceStyle::Outline);
-        assert_eq!(FenceStyle::Outline.next(), FenceStyle::Glass);
-        assert_eq!(FenceStyle::Glass.next(), FenceStyle::Filled);
+    fn fence_layout_cycles() {
+        assert_eq!(FenceLayout::Grid.next(), FenceLayout::List);
+        assert_eq!(FenceLayout::List.next(), FenceLayout::Grid);
     }
 
     #[test]
-    fn fence_appearance_serde_backward_compatible() {
-        // 旧版 desk.json 的栅栏外观（无 style / border_width）应能加载并取默认值
+    fn sylva_appearance_serde_backward_compatible() {
+        // 旧版 desk.json 的栅栏外观（无 style / border_width / layout）应能加载并取默认值
         let old = r#"{"bg_color":[0.08,0.08,0.12,0.55],"corner_radius":12.0,"acrylic":true,"title_bar_height":32.0,"padding":12.0,"icon_size":48.0,"gap":10.0}"#;
         let a: FenceAppearance = serde_json::from_str(old).expect("旧配置应可反序列化");
-        assert_eq!(a.style, FenceStyle::Filled);
-        assert_eq!(a.border_width, 1.0);
+        assert_eq!(a.bg_style, FenceStyle::Glass);
+        assert_eq!(a.border_width, 1.75);
+        assert_eq!(a.layout, FenceLayout::Grid);
+        assert_eq!(a.opacity, 0.55);
+        assert_eq!(a.tint, None);
+    }
+
+    #[test]
+    fn desk_console_fields_serde_backward_compatible() {
+        // 旧版 desk.json 无 todos / console_open / console_pos：应取默认（打开控制台）
+        let old = r#"{"version":1,"settings":{"show_free_area":true,"free_area_height":90.0,"hotkeys":{},"autostart":false},"fences":[],"free_icons":[],"icons":{}}"#;
+        let d: Desk = serde_json::from_str(old).expect("旧配置应可反序列化");
+        assert!(d.todos.is_empty());
+        assert_eq!(d.next_todo_id, 1);
+        assert!(d.console_open);
+        assert_eq!(d.console_pos, None);
+        assert_eq!(d.console_size, None);
+        // 旧配置无插件/桌面模式字段：默认注册表（待办启用）+ 栅栏模式
+        assert_eq!(d.plugins.len(), 2);
+        assert!(d.plugins.iter().any(|p| p.id == "todo" && p.enabled));
+        assert!(!d.desktop_mode);
+    }
+
+    #[test]
+    fn plugin_entry_roundtrip() {
+        let mut p = PluginEntry::builtin_notes();
+        p.enabled = true;
+        p.note_text = "买牛奶\n拿快递".into();
+        let json = serde_json::to_string(&p).unwrap();
+        let back: PluginEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "notes");
+        assert!(back.enabled);
+        assert_eq!(back.note_text, "买牛奶\n拿快递");
+    }
+
+    #[test]
+    fn plugin_kind_labels() {
+        assert_eq!(PluginKind::Todo.label(), "待办事项");
+        assert_eq!(PluginKind::Notes.label(), "便签");
+        assert_eq!(PluginKind::External.label(), "外部插件");
+    }
+
+    #[test]
+    fn todo_item_roundtrip() {
+        let t = TodoItem::new(7, "写周报".into(), "周五前提交".into());
+        let json = serde_json::to_string(&t).unwrap();
+        let back: TodoItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, 7);
+        assert_eq!(back.name, "写周报");
+        assert_eq!(back.detail, "周五前提交");
+        assert!(!back.done);
+    }
+
+    #[test]
+    fn todo_item_old_text_field_backward_compatible() {
+        // 旧配置只有 `text`（无 detail）：应映射到 name，detail 取默认空串
+        let old = r#"{"id":3,"text":"旧事项","done":true}"#;
+        let t: TodoItem = serde_json::from_str(old).expect("旧待办应可反序列化");
+        assert_eq!(t.name, "旧事项");
+        assert_eq!(t.detail, "");
+        assert!(t.done);
     }
 }

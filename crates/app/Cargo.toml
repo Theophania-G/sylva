@@ -1,13 +1,13 @@
 [package]
-name = "fence-app"
+name = "sylva-app"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
-fence-core = { workspace = true }
-fence-shell = { path = "../shell" }
-fence-render = { path = "../render" }
+sylva-core = { workspace = true }
+sylva-shell = { path = "../shell" }
+sylva-render = { path = "../render" }
 windows = { workspace = true }
 
 crossbeam-channel = { workspace = true }
@@ -20,3 +20,7 @@ serde_json = { workspace = true }
 [[bin]]
 name = "sylva"
 path = "src/main.rs"
+
+[build-dependencies]
+# 把 sylva.ico 编译进 exe 资源（资源 ID 1 = 主图标：Explorer/任务栏/文件属性都显示它）
+winres = "0.1"

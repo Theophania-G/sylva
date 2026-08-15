@@ -39,8 +39,15 @@ pub struct TextStyle {
 }
 
 /// 主题：栅栏外观、标题、图标网格与文字。
+///
+/// 渲染目标固定为 96 DPI（1 DIP = 1 物理像素），因此**全部尺寸都是物理像素**。
+/// App 层在 `Theme::default()` 后按 `scale = 系统DPI / 96` 把每个 DIP 度量放大；
+/// `scale` 同时供绘制层的固定偏移（按钮留白、控制台边距等）按同一比例缩放，
+/// 保证高 DPI 下布局比例一致、文字行列不重叠。
 #[derive(Debug, Clone)]
 pub struct Theme {
+    /// DPI 缩放系数（系统 DPI / 96）；默认 1.0 = 100% 缩放。
+    pub scale: f32,
     // 栅栏外观
     pub fence_bg: Color,
     pub fence_border: Color,
@@ -57,14 +64,18 @@ pub struct Theme {
     pub caption_max_width: f32,
     // 网格
     pub icon_cols: u32,
+    // 列表布局
+    pub list_row_gap: f32,
+    pub list_label_gap: f32,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         // 现代深色半透明栅栏；具体数值在 M4 视觉打磨阶段调整。
         Self {
+            scale: 1.0,
             fence_bg: Color::rgba(0.13, 0.15, 0.19, 0.60),
-            fence_border: Color::rgba(1.0, 1.0, 1.0, 0.10),
+            fence_border: Color::rgba(1.0, 1.0, 1.0, 0.42),
             fence_corner_radius: 12.0,
             fence_padding: 14.0,
             title: TextStyle {
@@ -83,6 +94,8 @@ impl Default for Theme {
             },
             caption_max_width: 80.0,
             icon_cols: 5,
+            list_row_gap: 8.0,
+            list_label_gap: 10.0,
         }
     }
 }

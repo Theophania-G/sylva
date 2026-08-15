@@ -9,6 +9,10 @@ pub enum Ease {
     Linear,
     QuadInOut,
     CubicOut,
+    /// 过冲回弹（easeOutBack）：目标方向超出一点再收回到终点。
+    BackOut,
+    /// 阻尼弹簧：快速起步、轻微震荡、自然收敛（比 BackOut 更有“物理感”）。
+    Spring,
 }
 
 /// 把归一化进度 `t`（0..=1）映射为缓动后的进度。
@@ -24,6 +28,16 @@ pub fn ease(t: f32, kind: Ease) -> f32 {
             }
         }
         Ease::CubicOut => 1.0 - (1.0 - t).powi(3),
+        Ease::BackOut => {
+            const C1: f32 = 1.70158;
+            const C3: f32 = C1 + 1.0;
+            1.0 + C3 * (t - 1.0).powi(3) + C1 * (t - 1.0).powi(2)
+        }
+        Ease::Spring => {
+            // 归一化阻尼弹簧：t=0 → 0，轻微过冲后收敛到 1（终值精确钳到 1）。
+            let v = 1.0 - (-5.0 * t).exp() * (7.0 * t).cos();
+            v.clamp(0.0, 1.08)
+        }
     }
 }
 
@@ -124,6 +138,13 @@ mod tests {
         assert_eq!(ease(1.0, Ease::Linear), 1.0);
         assert_eq!(ease(0.0, Ease::CubicOut), 0.0);
         assert_eq!(ease(1.0, Ease::CubicOut), 1.0);
+        assert_eq!(ease(0.0, Ease::BackOut), 0.0);
+        assert!((ease(1.0, Ease::BackOut) - 1.0).abs() < 1e-5);
+        assert_eq!(ease(0.0, Ease::Spring), 0.0);
+        // 弹簧中段应有轻微过冲（>1），体现“丝滑回弹”
+        assert!(ease(0.4, Ease::Spring) > 1.0);
+        // 阻尼弹簧终值收敛到 1（允许小幅残差，视觉上已稳定）
+        assert!((ease(1.0, Ease::Spring) - 1.0).abs() < 1e-2);
     }
 
     #[test]

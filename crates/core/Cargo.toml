@@ -1,5 +1,5 @@
 [package]
-name = "fence-core"
+name = "sylva-core"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

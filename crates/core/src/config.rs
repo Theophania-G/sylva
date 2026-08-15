@@ -102,7 +102,7 @@ mod tests {
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("fence-core-test-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("sylva-core-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -128,6 +128,7 @@ mod tests {
             state: crate::model::FenceState::Expanded,
             icon_ids: Vec::new(),
             appearance: crate::model::FenceAppearance::default(),
+            scroll: 0.0,
         });
         store.save(&desk).unwrap();
 
