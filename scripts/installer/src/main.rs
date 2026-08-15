@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// 内嵌主程序（编译期打包，安装器独立分发）。
 const SYLVA_EXE: &[u8] = include_bytes!("../../../target/release/sylva.exe");
 /// 内嵌安装脚本（快捷方式 / 自启 / 卸载信息）。
-const SETUP_PS1: &str = include_str!("setup.ps1");
+const SETUP_PS1: &str = include_str!("../setup.ps1");
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
