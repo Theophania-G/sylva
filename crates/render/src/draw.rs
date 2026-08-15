@@ -497,6 +497,18 @@ fn draw_widget(
     };
     let tb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.90 * a]), None)? };
     draw_text_centered(target, &w.title, &formats.label, title_lr, &tb);
+    // 标题栏与内容的分隔线
+    let sep_y = w.y + WIDGET_TITLE_S * s;
+    let sep = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.10 * a]), None)? };
+    let p1 = windows_numerics::Vector2 {
+        X: w.x + WIDGET_PAD_S * s,
+        Y: sep_y,
+    };
+    let p2 = windows_numerics::Vector2 {
+        X: w.x + w.width - WIDGET_PAD_S * s,
+        Y: sep_y,
+    };
+    unsafe { target.DrawLine(p1, p2, &sep, 1.0, None) };
 
     // 关闭按钮
     let close_hover = matches!(w.hover_zone, Some(WidgetZone::Close));

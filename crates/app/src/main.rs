@@ -242,6 +242,10 @@ struct Runtime {
     widget_anims: HashMap<(u64, u64), RowAnim>,
     /// 关闭中的小组件（淡出结束后从模型移除）。
     closing_widgets: Vec<ClosingWidget>,
+    /// 新建中的小组件（淡入动画）。
+    spawning_widgets: Vec<ClosingWidget>,
+    /// 小组件拖动/缩放补间（视觉矩形追赶模型，与栅栏同机制）。
+    widget_tweens: Vec<FenceTween>,
     /// 栅栏管理页列表滚动偏移（物理像素）。
     fence_scroll: f32,
     /// 各小组件待办列表的滚动偏移（widget id → 物理像素）。
@@ -755,6 +759,8 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         widget_hover: None,
         widget_anims: HashMap::new(),
         closing_widgets: Vec::new(),
+        spawning_widgets: Vec::new(),
+        widget_tweens: Vec::new(),
         fence_scroll: 0.0,
         widget_scrolls: HashMap::new(),
         fence_tweens: Vec::new(),
@@ -1200,26 +1206,58 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
             handle_widget_click(rt, widget, zone);
         }
         OverlayEvent::WidgetMove { widget, pos } => {
+            let s = rt.theme.scale;
+            let mut target = None;
             if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                w.bounds.x = pos.0;
-                w.bounds.y = pos.1;
+                // 事件坐标是物理像素，模型存 DIP（跨 DPI 稳定）→ 除以缩放
+                w.bounds.x = pos.0 / s;
+                w.bounds.y = pos.1 / s;
+                target = Some(w.bounds);
+            }
+            if let Some(to) = target {
+                // 丝滑跟随：视觉矩形从当前位置追过去（模型已落到目标）
+                let from = widget_visual_rect(rt, widget);
+                set_widget_tween(
+                    rt,
+                    FenceTween {
+                        fence: widget as usize,
+                        from,
+                        to,
+                        t0: Instant::now(),
+                        dur: 0.12,
+                    },
+                );
             }
         }
         OverlayEvent::WidgetResize { widget, rect } => {
+            let s = rt.theme.scale;
+            let mut target = None;
             if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                let s = rt.theme.scale;
-                let min_w = WIDGET_MIN_W * s;
-                let min_h = WIDGET_MIN_H * s;
-                w.bounds.w = rect.2.max(min_w);
-                w.bounds.h = rect.3.max(min_h);
+                w.bounds.w = (rect.2 / s).max(WIDGET_MIN_W);
+                w.bounds.h = (rect.3 / s).max(WIDGET_MIN_H);
+                target = Some(w.bounds);
+            }
+            if let Some(to) = target {
+                let from = widget_visual_rect(rt, widget);
+                set_widget_tween(
+                    rt,
+                    FenceTween {
+                        fence: widget as usize,
+                        from,
+                        to,
+                        t0: Instant::now(),
+                        dur: 0.12,
+                    },
+                );
             }
         }
         OverlayEvent::WidgetDragEnd { widget } => {
             // 拖动/缩放结束：钳制在屏幕内并持久化
             let screen = screen_rect(rt);
+            let s = rt.theme.scale;
             if let Some(w) = rt.desk.widgets.iter_mut().find(|w| w.id == widget) {
-                w.bounds.x = w.bounds.x.clamp(0.0, (screen.w - w.bounds.w).max(0.0));
-                w.bounds.y = w.bounds.y.clamp(0.0, (screen.h - w.bounds.h).max(0.0));
+                w.bounds.x = w.bounds.x.clamp(0.0, (screen.w / s - w.bounds.w).max(0.0));
+                w.bounds.y = w.bounds.y.clamp(0.0, (screen.h / s - w.bounds.h).max(0.0));
             }
             if let Err(e) = rt.store.save(&rt.desk) {
                 tracing::warn!("小组件位置持久化失败: {e}");
@@ -1365,6 +1403,13 @@ fn add_widget(rt: &mut Runtime, kind: WidgetKind) {
     let x = WIDGET_START_X + n as f32 * WIDGET_CASCADE;
     let y = WIDGET_START_Y + n as f32 * WIDGET_CASCADE;
     rt.desk.widgets.push(WidgetInstance::new(id, kind, x, y));
+    // 新建淡入
+    rt.spawning_widgets.push(ClosingWidget {
+        id,
+        t0: Instant::now(),
+        dur: 0.24,
+    });
+    arm_anim_timer(rt);
     if let Err(e) = rt.store.save(&rt.desk) {
         tracing::warn!("小组件持久化失败: {e}");
     }
@@ -1421,6 +1466,39 @@ fn widget_input_rect(rt: &Runtime, w: &WidgetInstance) -> RectF {
         w: w.bounds.w * s - 2.0 * WIDGET_PAD * s,
         h: WIDGET_INPUT_H * s,
     }
+}
+
+/// 小组件当前视觉矩形（补间插值；无补间 = 模型矩形，DIP）。
+fn widget_visual_rect(rt: &Runtime, widget: u64) -> Rect {
+    let now = Instant::now();
+    if let Some(t) = rt.widget_tweens.iter().find(|t| t.fence == widget as usize) {
+        match tween_progress(t.t0, t.dur, now) {
+            Some(p) => {
+                let e = ease_out_cubic(p);
+                Rect::new(
+                    t.from.x + (t.to.x - t.from.x) * e,
+                    t.from.y + (t.to.y - t.from.y) * e,
+                    t.from.w + (t.to.w - t.from.w) * e,
+                    t.from.h + (t.to.h - t.from.h) * e,
+                )
+            }
+            None => t.to,
+        }
+    } else {
+        rt.desk
+            .widgets
+            .iter()
+            .find(|w| w.id == widget)
+            .map(|w| w.bounds)
+            .unwrap_or_default()
+    }
+}
+
+/// 记录/替换小组件补间并启动动画定时器。
+fn set_widget_tween(rt: &mut Runtime, tween: FenceTween) {
+    rt.widget_tweens.retain(|t| t.fence != tween.fence);
+    rt.widget_tweens.push(tween);
+    arm_anim_timer(rt);
 }
 
 /// 便签小组件正文区矩形（物理像素）。
@@ -2315,6 +2393,8 @@ fn arm_anim_timer(rt: &mut Runtime) {
     if !rt.console_anim.active()
         && rt.desktop_fade.is_none()
         && rt.fence_tweens.is_empty()
+        && rt.widget_tweens.is_empty()
+        && rt.spawning_widgets.is_empty()
         && !icon_hover_active(rt)
         && rt.widget_anims.is_empty()
         && rt.closing_widgets.is_empty()
@@ -2358,6 +2438,12 @@ fn advance_anim(rt: &mut Runtime) -> bool {
     for key in done_rows {
         rt.widget_anims.remove(&key);
     }
+    // 小组件拖动/缩放补间：结束即摘除（视觉 = 模型）
+    rt.widget_tweens
+        .retain(|t| tween_progress(t.t0, t.dur, now).is_some());
+    // 新建淡入：结束即摘除
+    rt.spawning_widgets
+        .retain(|c| tween_progress(c.t0, c.dur, now).is_some());
     // 关闭中的小组件：动画结束即从模型移除并持久化
     let mut removed = false;
     rt.closing_widgets.retain(|c| {
@@ -2389,6 +2475,8 @@ fn advance_anim(rt: &mut Runtime) -> bool {
     anim.active()
         || rt.desktop_fade.is_some()
         || !rt.fence_tweens.is_empty()
+        || !rt.widget_tweens.is_empty()
+        || !rt.spawning_widgets.is_empty()
         || !rt.widget_anims.is_empty()
         || !rt.closing_widgets.is_empty()
         || icon_hover_active(rt)
@@ -3717,17 +3805,26 @@ fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
 fn build_widget(rt: &Runtime, w: &WidgetInstance, alpha: f32, now: Instant) -> SceneWidget {
     let s = rt.theme.scale;
     // 关闭中的小组件淡出
-    let alpha = match rt.closing_widgets.iter().find(|c| c.id == w.id) {
+    let mut alpha = match rt.closing_widgets.iter().find(|c| c.id == w.id) {
         Some(c) => match tween_progress(c.t0, c.dur, now) {
             Some(p) => alpha * (1.0 - ease_out_cubic(p)),
             None => 0.0,
         },
         None => alpha,
     };
-    let x = w.bounds.x * s;
-    let y = w.bounds.y * s;
-    let width = w.bounds.w * s;
-    let height = w.bounds.h * s;
+    // 新建中的小组件淡入
+    if let Some(c) = rt.spawning_widgets.iter().find(|c| c.id == w.id) {
+        match tween_progress(c.t0, c.dur, now) {
+            Some(p) => alpha *= ease_out_cubic(p),
+            None => alpha = 0.0,
+        }
+    }
+    // 拖动/缩放补间：视觉矩形（DIP）
+    let visual = widget_visual_rect(rt, w.id);
+    let x = visual.x * s;
+    let y = visual.y * s;
+    let width = visual.w * s;
+    let height = visual.h * s;
     let hover_zone = rt
         .widget_hover
         .filter(|(id, _)| *id == w.id)

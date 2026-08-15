@@ -216,7 +216,7 @@ pub struct Fence {
     pub title: Option<String>,
     /// 所属显示器（逻辑坐标基准）。
     pub monitor_id: u32,
-    /// 栅栏几何（逻辑坐标）。
+    /// 栅栏几何（物理像素；与 overlay 虚拟屏幕坐标一致，渲染直接用）。
     pub bounds: Rect,
     pub state: FenceState,
     /// 成员顺序即布局顺序。
