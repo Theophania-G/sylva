@@ -1,6 +1,9 @@
 # Local MSIX sideload test: sign with a throwaway dev cert, install,
 # launch, then remove package and cert.
 # Usage: powershell -ExecutionPolicy Bypass -File scripts\msix-sideload-test.ps1
+param(
+    [string]$Publisher = 'CN=01501FE3-FC6B-4246-A4F2-33974DB842B5'
+)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
@@ -17,7 +20,7 @@ $kitBin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -F
 if (-not $kitBin) { throw 'signtool not found' }
 
 # 1) throwaway dev cert
-$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Sylva' `
+$cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject $Publisher `
     -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -KeySpec Signature `
     -NotAfter (Get-Date).AddYears(3)
 
