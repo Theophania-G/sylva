@@ -1,5 +1,7 @@
 /target
 /dist
+/packaging/msix/build
+/docs/store/screenshots
 **/*.rs.bk
 *.log
 *.exe
