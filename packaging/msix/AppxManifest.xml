@@ -7,7 +7,7 @@
   <Identity Name="Sylva.DesktopFences" Publisher="{{PUBLISHER}}" Version="{{VERSION}}.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>Sylva</DisplayName>
-    <PublisherDisplayName>Sylva</PublisherDisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
     <Description>桌面栅栏整理器：在桌面上自由创建栅栏，把图标整理得井井有条。</Description>
     <Logo>assets\StoreLogo.png</Logo>
   </Properties>

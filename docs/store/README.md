@@ -35,12 +35,16 @@ powershell -ExecutionPolicy Bypass -File scripts\msix-sideload-test.ps1
 1. 打开 https://partner.microsoft.com 用个人微软账号注册开发者
 2. 完成身份验证后，进入"产品 → 新建产品 → Windows"
 3. 保留一个应用名称（例如 Sylva），会得到一个 Publisher 身份
-4. **重新打包**，把 Publisher 换成你账号的发布者：
+4. **重新打包**，把 Publisher 换成你账号的发布者，PublisherDisplayName 换成你的发布者显示名：
    ```powershell
-   powershell -ExecutionPolicy Bypass -File scripts\package-msix.ps1 -Publisher "CN=你的发布者CN"
+   powershell -ExecutionPolicy Bypass -File scripts\package-msix.ps1 `
+     -Publisher "CN=你的发布者ID" -PublisherDisplayName "你的显示名"
    ```
-   并把 `packaging/msix/AppxManifest.xml` 里 `Identity Name` 换成商店分配的名称
+   `Publisher`（发布者 ID，形如 CN=xxxxxxxx-xxxx-...）和 `Identity Name`
+   （包标识名称）在 Partner Center → 产品 → Sylva → 产品标识 里查看
 5. 上传 `dist\Sylva-0.1.0-x64.msix`，填写描述、类别，上传截图与图标
+   - 上传后如果有“受限功能”区块：勾选 `runFullTrust` 并填理由
+     （Win32 桌面应用需完全信任访问桌面壳层），保存提交
 6. 提交审核（首次 24–72 小时）
 
 ## 提交 winget

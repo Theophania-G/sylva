@@ -5,6 +5,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\package-msix.ps1 -Publisher "CN=YourPublisher" -Sign -CertPath cert.pfx -CertPassword xxx
 param(
     [string]$Publisher = 'CN=Sylva',
+    [string]$PublisherDisplayName = 'Sylva',
     [string]$Version = '0.1.0',
     [string]$OutName = 'Sylva-0.1.0-x64',
     [switch]$Sign,
@@ -35,7 +36,7 @@ Copy-Item (Join-Path $assets '*') (Join-Path $build 'assets') -Force
 # ---- 3) Render manifest (replace placeholders) ----
 $bg = (Get-Content (Join-Path $assets 'background.txt') -Raw).Trim()
 $manifest = Get-Content (Join-Path $root 'packaging\msix\AppxManifest.xml') -Raw -Encoding UTF8
-$manifest = $manifest.Replace('{{PUBLISHER}}', $Publisher).Replace('{{VERSION}}', $Version).Replace('{{BG_COLOR}}', $bg)
+$manifest = $manifest.Replace('{{PUBLISHER}}', $Publisher).Replace('{{PUBLISHER_DISPLAY_NAME}}', $PublisherDisplayName).Replace('{{VERSION}}', $Version).Replace('{{BG_COLOR}}', $bg)
 [System.IO.File]::WriteAllText((Join-Path $build 'AppxManifest.xml'), $manifest, (New-Object System.Text.UTF8Encoding($true)))
 
 # ---- 4) MakeAppx pack ----
