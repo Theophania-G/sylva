@@ -8,8 +8,12 @@
 | --- | --- |
 | MSIX 安装包（未签名，供商店提交） | `dist/Sylva-0.1.0-x64.msix` |
 | 图标/磁贴/闪屏素材 | `packaging/msix/assets/` |
-| 商店截图（1536×960） | `docs/store/screenshots/` |
+| 商店截图（1536×960，仅本地，不入公开仓库） | `docs/store/screenshots/` |
 | winget 清单 | `packaging/winget/manifests/` |
+
+> 截图拍自真实桌面，包含个人内容，出于隐私考虑已从公开仓库排除
+> （`.gitignore` 忽略 `docs/store/screenshots/`）。上传商店前请先自行
+> 检查截图内容，确认没有敏感信息。
 
 ## 打包命令
 
