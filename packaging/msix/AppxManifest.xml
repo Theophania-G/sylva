@@ -24,7 +24,7 @@
   <Applications>
     <Application Id="Sylva" Executable="sylva.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Sylva"
+        DisplayName="{{DISPLAY_NAME}}"
         Description="桌面栅栏整理器"
         BackgroundColor="{{BG_COLOR}}"
         Square150x150Logo="assets\Square150x150Logo.png"
