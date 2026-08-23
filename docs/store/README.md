@@ -64,24 +64,36 @@ fork 上建分支 → 上传清单 → 打开 PR。
 
 **名称**：Sylva 桌面栅栏整理器
 
-**简短说明**：桌面栅栏整理器，在桌面上自由创建栅栏，把图标整理得井井有条。
+**简短说明**：轻量、美观的 Windows 桌面整理工具，用栅栏把桌面图标整理得井井有条。
 
 **详细说明**：
-Sylva 是一款低占用、高审美的 Windows 桌面栅栏整理器：
-- 在桌面任意位置自由创建栅栏，网格 / 列表两种布局
-- 栅栏自动磁吸、互不重叠，一键切换回原始桌面
-- 控制中心统一管理栅栏布局、背景风格与色调
-- 托盘常驻，双击快速开关控制中心
+Sylva 栅栏 是一款轻量、美观的 Windows 桌面整理工具，帮助你把桌面图标按自己的习惯归类，让杂乱无章的桌面变得井井有条。
+
+主要功能：
+- 自由创建栅栏：在桌面任意位置创建多个栅栏区域，把常用软件、文件夹和文档分门别类放进不同的栅栏里，一目了然。
+- 两种布局：每个栅栏支持网格和列表两种展示方式，图标大小、间距、圆角、背景风格都可以单独调节，满足不同使用习惯。
+- 智能防重叠：拖动栅栏时自动磁吸对齐，栅栏之间互不重叠，桌面布局始终保持整齐。
+- 控制中心：集中管理所有栅栏——新增、移出、重命名，以及调整布局、背景风格和色调，所有设置一目了然。
+- 一键切换桌面：随时在“栅栏整理桌面”和“原始桌面”之间一键切换，互不影响。
+- 低占用、高颜值：GPU 加速渲染，系统资源占用极低；支持玻璃、透明、纯色等多种背景风格，视觉简洁美观。
+
+适用场景：适合希望高效整理 Windows 桌面图标、让桌面保持整洁美观的所有用户。安装后可从开始菜单或桌面快捷方式启动，应用常驻系统托盘，随时唤出。
 
 ### English
 
-**Name**: Sylva
+**Name**: Sylva Fences
 
-**Short description**: A lightweight desktop fence organizer for Windows.
+**Short description**: A lightweight, good-looking Windows desktop organizer that groups desktop icons into fences.
 
 **Long description**:
-Sylva is a low-footprint desktop fence organizer for Windows:
-- Create fences anywhere on the desktop, in grid or list layout
-- Fences snap and never overlap; one-click switch back to the original desktop
-- A control center manages fence layout, background style and tint
-- Lives in the tray; double-click to toggle the control center
+Sylva Fences is a lightweight, good-looking Windows desktop organizer that helps you group desktop icons the way you like, keeping your desktop tidy and easy to find things.
+
+Key features:
+- Create fences anywhere on the desktop and organize apps, folders and documents into separate groups.
+- Grid or list layout per fence, with adjustable icon size, spacing, corner radius and background style.
+- Fences snap and never overlap while dragging, so your desktop always stays neat.
+- A control center manages all fences: add, remove, rename, and adjust layout, background and tint.
+- One-click switch between the fenced desktop and the original desktop.
+- GPU-accelerated rendering with very low resource usage; glass, outline and filled background styles.
+
+Suitable for anyone who wants a clean, well-organized Windows desktop. Launch from the Start menu or desktop shortcut; the app lives in the system tray for quick access.
