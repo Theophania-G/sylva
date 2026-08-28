@@ -90,7 +90,7 @@ pub enum FenceState {
 
 /// 栅栏背景风格（决定背景填充与不透明度）。
 ///
-/// v3 起替代「透明度滑块」：栅栏背景只分三种固定风格，不再用 0..1 滑块细调。
+/// v3 起替代「透明度滑块」：栅栏背景只分几种固定风格，不再用 0..1 滑块细调。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FenceStyle {
     /// 颜色：不透明纯色填充（色调来自「背景色调」；未选时用默认背景色）。
@@ -100,6 +100,8 @@ pub enum FenceStyle {
     /// 玻璃：默认半透明玻璃感（可叠加「背景色调」着色，45% 混合）。
     #[default]
     Glass,
+    /// 模糊：背景 = 栅栏底下桌面内容的高斯模糊（磨砂玻璃；CPU 侧降采样 + 高斯）。
+    Blur,
 }
 
 impl FenceStyle {
@@ -109,6 +111,7 @@ impl FenceStyle {
             FenceStyle::Filled => "颜色",
             FenceStyle::Outline => "透明",
             FenceStyle::Glass => "玻璃",
+            FenceStyle::Blur => "模糊",
         }
     }
 }
@@ -120,6 +123,8 @@ pub enum FenceLayout {
     Grid,
     /// 列表：图标单列纵向排布，标签在图标右侧。
     List,
+    /// 侧边栏：仿 Mac Dock，仅显示图标，悬停放大 + 名称预览。
+    Sidebar,
 }
 
 impl FenceLayout {
@@ -128,6 +133,7 @@ impl FenceLayout {
         match self {
             FenceLayout::Grid => "网格",
             FenceLayout::List => "列表",
+            FenceLayout::Sidebar => "侧边栏",
         }
     }
 
@@ -135,7 +141,30 @@ impl FenceLayout {
     pub fn next(self) -> Self {
         match self {
             FenceLayout::Grid => FenceLayout::List,
-            FenceLayout::List => FenceLayout::Grid,
+            FenceLayout::List => FenceLayout::Sidebar,
+            FenceLayout::Sidebar => FenceLayout::Grid,
+        }
+    }
+}
+
+/// 侧边栏停靠位置。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SidebarPosition {
+    /// 屏幕左侧（纵向排列）。
+    #[default]
+    Left,
+    /// 屏幕上侧（横向排列）。
+    Top,
+    /// 屏幕右侧（纵向排列）。
+    Right,
+}
+
+impl SidebarPosition {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SidebarPosition::Left => "左侧",
+            SidebarPosition::Top => "上侧",
+            SidebarPosition::Right => "右侧",
         }
     }
 }
@@ -177,6 +206,9 @@ pub struct FenceAppearance {
     /// 「玻璃」风格下 45% 向色调靠拢；「颜色」风格下作为纯色填充。
     #[serde(default)]
     pub tint: Option<[f32; 3]>,
+    /// 侧边栏停靠位置（仅 Sidebar 布局有效）。
+    #[serde(default)]
+    pub sidebar_pos: SidebarPosition,
 }
 
 /// `bg_style` 未持久化时的默认值：玻璃（保持旧版滑块默认的半透明观感）。
@@ -204,6 +236,7 @@ impl Default for FenceAppearance {
             border_width: 1.75,
             opacity: 0.55,
             tint: None,
+            sidebar_pos: SidebarPosition::Left,
         }
     }
 }
@@ -225,6 +258,13 @@ pub struct Fence {
     /// 内容滚动偏移（物理像素；0 = 未滚动）。内容超出可视区时用滚轮滚动。
     #[serde(default)]
     pub scroll: f32,
+    /// 栅栏内项目的自定义存储位置（绝对路径）。None = 使用默认内部库。
+    /// 用户可在控制台中更改此路径，已有的库内项会被移动到新位置。
+    #[serde(default)]
+    pub storage_path: Option<String>,
+    /// 侧边栏是否折叠（仅 Sidebar 布局有效）。折叠后只显示一个小箭头。
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
 }
 
 /// 图标元数据。核心层只关心标识与展示信息。
@@ -551,6 +591,8 @@ mod tests {
             icon_ids: Vec::new(),
             appearance: FenceAppearance::default(),
             scroll: 0.0,
+            storage_path: None,
+            sidebar_collapsed: false,
         });
 
         // 移到栅栏
@@ -587,6 +629,8 @@ mod tests {
             icon_ids: vec!["a".into(), "ghost".into()],
             appearance: FenceAppearance::default(),
             scroll: 0.0,
+            storage_path: None,
+            sidebar_collapsed: false,
         });
         d.free_icons = vec!["ghost2".into()];
         d.validate();
@@ -606,7 +650,8 @@ mod tests {
     #[test]
     fn fence_layout_cycles() {
         assert_eq!(FenceLayout::Grid.next(), FenceLayout::List);
-        assert_eq!(FenceLayout::List.next(), FenceLayout::Grid);
+        assert_eq!(FenceLayout::List.next(), FenceLayout::Sidebar);
+        assert_eq!(FenceLayout::Sidebar.next(), FenceLayout::Grid);
     }
 
     #[test]

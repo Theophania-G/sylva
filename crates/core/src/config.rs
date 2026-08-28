@@ -129,6 +129,8 @@ mod tests {
             icon_ids: Vec::new(),
             appearance: crate::model::FenceAppearance::default(),
             scroll: 0.0,
+            storage_path: None,
+            sidebar_collapsed: false,
         });
         store.save(&desk).unwrap();
 

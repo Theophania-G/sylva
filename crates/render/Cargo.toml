@@ -1,6 +1,6 @@
 [package]
 name = "sylva-render"
-description = "渲染层：overlay 窗口 + DirectComposition/Direct2D/DirectWrite 绘制"
+description = "渲染层：overlay 窗口 + Windows.UI.Composition/Direct2D/DirectWrite 绘制"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,5 +9,6 @@ license.workspace = true
 sylva-core = { workspace = true }
 sylva-shell = { workspace = true }
 windows = { workspace = true }
+windows-core = { workspace = true }
 windows-numerics = { workspace = true }
 tracing = { workspace = true }

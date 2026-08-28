@@ -2,7 +2,7 @@
 //!
 //! 坐标全部为**物理像素**（虚拟屏幕坐标），与 overlay 窗口客户端坐标一致。
 
-use sylva_core::model::{FenceLayout, FenceStyle};
+use sylva_core::model::{FenceLayout, FenceStyle, SidebarPosition};
 
 use crate::overlay::{ConsoleZone, RectF};
 
@@ -68,10 +68,16 @@ pub struct SceneFence {
     pub border_width: f32,
     /// 边框颜色（直通 alpha）。
     pub border_color: [f32; 4],
-    /// 背景填充颜色（直通 alpha）；None = 内部完全透明（仅描边）。
+    /// 背景填充颜色（直通 alpha）；None = 内部完全透明（仅描边 / 模糊）。
     pub fill_color: Option<[f32; 4]>,
+    /// 模糊背景（FenceStyle::Blur）：背景由合成器里独立的 GaussianBlurEffect 视觉
+    /// 绘制（GPU，实时），本栅栏内容区保持透明以透出；合成器据此建/删模糊视觉。
+    pub blur: bool,
     /// 整体透明度 0..1（桌面切换淡出/淡入用；绘制时乘到所有颜色上）。
     pub alpha: f32,
+    /// 侧边栏悬停工具提示矩形（物理像素，由 App 层按屏幕边界计算好，
+    /// 可延伸到栅栏之外）；None = 不显示。非侧边栏布局恒为 None。
+    pub tooltip_rect: Option<RectF>,
 }
 
 impl SceneFence {
@@ -127,22 +133,30 @@ pub struct SceneFenceDetail {
     pub icon_size: f32,
     pub style: FenceStyle,
     pub tint: Option<[f32; 3]>,
-    /// 布局：网格 / 列表
+    /// 布局：网格 / 列表 / 侧边栏
     pub layout_grid: RectF,
     pub layout_list: RectF,
+    pub layout_sidebar: RectF,
     /// 图标大小：小 / 中 / 大
     pub size_s: RectF,
     pub size_m: RectF,
     pub size_l: RectF,
-    /// 背景风格：玻璃 / 描边 / 颜色
+    /// 背景风格：玻璃 / 描边 / 颜色 / 模糊
     pub style_glass: RectF,
     pub style_outline: RectF,
     pub style_filled: RectF,
+    pub style_blur: RectF,
     /// 色调：默认（恢复玻璃底色）+ 预设色板（与 App 层 TINT_PRESETS 平行）。
     pub tint_default: RectF,
     pub tints: Vec<RectF>,
-    /// 「移出栅栏」按钮（详情卡右上角）。
-    pub remove_btn: RectF,
+    /// 「更改位置…」按钮（存储位置行）。
+    pub storage_btn: RectF,
+    /// 当前侧边栏停靠位置（仅 Sidebar 布局显示）。
+    pub sidebar_pos: SidebarPosition,
+    /// 侧边栏位置按钮：左 / 上 / 右
+    pub sidebar_left: RectF,
+    pub sidebar_top: RectF,
+    pub sidebar_right: RectF,
 }
 
 /// 控制台面板（控制中心：栅栏管理）。
@@ -169,6 +183,8 @@ pub struct SceneConsole {
     pub fence_detail: Option<SceneFenceDetail>,
     /// 栅栏管理页：「添加栅栏」按钮。
     pub add_fence: RectF,
+    /// 栅栏管理页：「删除栅栏」按钮（添加按钮下方）。
+    pub remove_btn: RectF,
     pub fill_color: [f32; 4],
     pub border_color: [f32; 4],
     /// 面板展开进度 0..1（0=折叠胶囊，1=完整面板）。
@@ -219,7 +235,7 @@ impl Scene {
 
     /// 全部内容的包围盒（虚拟屏幕坐标：全部栅栏 ∪ 控制台）。
     ///
-    /// 合成器据此把 DComp 表面缩到内容大小而非整屏（省内存）。没有内容时返回 None。
+    /// 合成器据此把合成表面缩到内容大小而非整屏（省内存）。没有内容时返回 None。
     pub fn content_rect(&self) -> Option<RectF> {
         let mut min_x = f32::INFINITY;
         let mut min_y = f32::INFINITY;
@@ -232,6 +248,13 @@ impl Scene {
             max_x = max_x.max(f.x + f.width);
             max_y = max_y.max(f.y + f.height);
             any = true;
+            // 侧边栏工具提示可延伸到栅栏之外，必须并入表面，否则区域外绘制不可见。
+            if let Some(tt) = f.tooltip_rect {
+                min_x = min_x.min(tt.x);
+                min_y = min_y.min(tt.y);
+                max_x = max_x.max(tt.x + tt.w);
+                max_y = max_y.max(tt.y + tt.h);
+            }
         }
         if let Some(c) = &self.console {
             min_x = min_x.min(c.x);
@@ -277,7 +300,9 @@ mod tests {
             border_width: 1.0,
             border_color: [1.0, 1.0, 1.0, 0.1],
             fill_color: Some([0.08, 0.08, 0.12, 0.55]),
+            blur: false,
             alpha: 1.0,
+            tooltip_rect: None,
         }
     }
 

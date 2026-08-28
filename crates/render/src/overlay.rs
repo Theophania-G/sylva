@@ -1,9 +1,10 @@
-//! overlay 窗口：挂在桌面壳层下的透明子窗口，承载 DComp 视觉树。
+//! overlay 窗口：挂在桌面壳层下的透明子窗口，承载 WinRT 合成视觉树。
 //!
 //! - 覆盖整个虚拟屏幕（多显示器），位置随父窗口屏幕坐标实时计算；
-//! - `WS_EX_NOACTIVATE` 不抢焦点；窗口内容完全由 DComp 视觉树提供（不设置
-//!   `WS_EX_NOREDIRECTIONBITMAP`——红方向免窗口无法与 DComp target 关联，
-//!   `CreateTargetForHwnd` 会返回 `E_INVALIDARG`）；
+//! - `WS_EX_NOACTIVATE` 不抢焦点；窗口内容完全由 WinRT `Windows.UI.Composition`
+//!   视觉树提供（`WS_EX_NOREDIRECTIONBITMAP` 无重定向位图——合成器直连窗口，
+//!   `CreateDesktopWindowTarget` 才可用，且 BackdropBrush 才能采样到窗口背后
+//!   真实的桌面，这是真·实时模糊的前置要求）；
 //! - **点击穿透**：窗口区域被 `SetWindowRgn` 裁剪为全部栅栏矩形的并集
 //!   （`CombineRgn(RGN_OR)`）。区域外的鼠标命中直接落到下方窗口（桌面/其他应用）。
 //!   不用 `WM_NCHITTEST` 返回 `HTTRANSPARENT`——它只能把点击转发给**同一进程**
@@ -30,8 +31,9 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, RegisterHotKey, ReleaseCapture, SetCapture, SetFocus, MOD_ALT, MOD_CONTROL,
-    MOD_SHIFT, VK_CONTROL, VK_F10,
+    MOD_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_F10,
 };
+use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, Shell_NotifyIconW, HDROP,
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
@@ -40,7 +42,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow,
+    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowDisplayAffinity, SetWindowLongPtrW,
+    ShowWindow, WDA_EXCLUDEFROMCAPTURE,
     TranslateMessage, CS_DBLCLKS, GWLP_USERDATA, HCURSOR, HICON, HTCLIENT, HTTRANSPARENT, ICON_BIG,
     ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MSG,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA,
@@ -48,10 +51,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION,
     WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_TIMER,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
-use sylva_core::model::{FenceLayout, FenceStyle};
+use sylva_core::model::{FenceLayout, FenceStyle, SidebarPosition};
 
 /// 窗口类名（全局唯一，单实例）。
 const CLASS_NAME: &str = "SylvaOverlay";
@@ -130,6 +133,9 @@ pub struct FenceHit {
     pub title: RectF,
     pub grip: RectF,
     pub id: usize,
+    /// 侧边栏悬停工具提示矩形（可延伸到栅栏之外）；None = 无。用于把工具提示
+    /// 区域并入窗口区域，否则区域外的绘制不可见。
+    pub tooltip: Option<RectF>,
 }
 
 /// 一个图标的命中数据。`fence` / `icon` 分别是 App 层 `desk.fences` 下标
@@ -157,11 +163,15 @@ pub enum ConsoleZone {
     FenceLayout(FenceLayout),
     FenceIconSize(f32),
     FenceStyle(FenceStyle),
+    /// 栅栏管理页：设置侧边栏停靠位置（仅 Sidebar 布局有效）。
+    FenceSidebarPos(SidebarPosition),
     FenceTint(Option<[f32; 3]>),
     /// 栅栏管理页：「添加栅栏」按钮（新建一个空白栅栏并选中）。
     AddFence,
     /// 栅栏管理页：移出当前选中的栅栏。
     RemoveFence,
+    /// 栅栏管理页：更改选中栅栏的存储位置（打开文件夹选择器）。
+    ChangeStoragePath,
 }
 
 /// 控制台（插件面板）的命中数据：整体矩形（窗口区域 + 命中判定范围）、
@@ -246,6 +256,11 @@ pub enum OverlayEvent {
     HoverEnter { fence: usize, icon: usize },
     /// 鼠标移出所有图标（清除高亮）。
     HoverLeave,
+    /// 光标位置变化（虚拟屏幕物理坐标）：App 层据此做连续 Dock 放大，
+    /// 位置未变时不上报（避免无谓重绘）。
+    CursorMove { x: f32, y: f32 },
+    /// 光标离开窗口（`WM_MOUSELEAVE`）：App 层清除 Dock 放大（恢复 1.0）。
+    CursorLeave,
     /// 文件被拖入某个栅栏（`WM_DROPFILES`）：App 把这些路径加进该栅栏。
     FilesDropped { fence: usize, paths: Vec<String> },
     /// 鼠标滚轮滚动某栅栏：`delta` 是滚轮原始刻度（正=向上/远离，负=向下）。
@@ -328,6 +343,8 @@ struct WindowState {
     hovered: Option<(usize, Option<usize>)>,
     /// 当前悬停的控制台控件（仅在变化时上报 ConsoleHover 事件）。
     console_hovered: Option<ConsoleZone>,
+    /// 上次上报的光标位置（仅位置变化才发 CursorMove，避免无谓重绘）。
+    last_cursor: Option<(f32, f32)>,
     /// App 层事件处理器；返回新的命中模型以同步区域与命中数据。
     ///
     /// 返回 `None` 表示丢弃本事件、保持当前命中模型：App 在模态菜单 / 属性页等
@@ -394,6 +411,7 @@ impl OverlayWindow {
             drag: None,
             hovered: None,
             console_hovered: None,
+            last_cursor: None,
             handler: None,
             edit_brush,
         });
@@ -405,7 +423,10 @@ impl OverlayWindow {
                 // 应用之上（桌面层级永远在正常应用下面）。键盘输入走隐藏焦点代理。
                 // `WS_EX_TOOLWINDOW`：不进任务栏/Alt+Tab——日常入口是托盘图标
                 // （默认折叠在通知区隐藏图标里），右键托盘即「Sylva 控制中心」。
-                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                // `WS_EX_NOREDIRECTIONBITMAP`：无重定向位图——WinRT 合成器直连窗口
+                // （CreateDesktopWindowTarget 要求），且 BackdropBrush 才能采样到
+                // 窗口背后真实的桌面（真·实时模糊的前置）。
+                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP,
                 PCWSTR(wide(CLASS_NAME).as_ptr()),
                 // 窗口标题：任务栏按钮/悬停提示显示「Sylva」（留空会退回进程名 sylva.exe）
                 PCWSTR(wide("Sylva").as_ptr()),
@@ -480,6 +501,12 @@ impl OverlayWindow {
             )
         };
         let _shown = unsafe { ShowWindow(hwnd, SW_SHOWNA) };
+        // 抓屏排除：`WDA_EXCLUDEFROMCAPTURE` 让本窗口（栅栏/侧边栏）不进入
+        // 屏幕抓取 API 的结果（其他软件/录屏看不到栅栏）。与模糊无关——模糊的
+        // BackdropBrush 采样 DWM 桌面合成，不受 WDA 影响，无需截图。
+        unsafe {
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        }
 
         // 隐藏焦点代理：独立顶层窗口（离屏 1×1，不进任务栏），只负责让进程成为前台，
         // 键盘焦点仍给 overlay（NOACTIVATE 本体不会因点击被激活/提层）。
@@ -660,11 +687,15 @@ fn apply_region(hwnd: HWND, model: &HitModel) {
     }
 }
 
-/// 把全部栅栏矩形 + 控制台面板合并成一个区域（RGN_OR 并集）。无有效矩形时返回 None。
+/// 把全部栅栏矩形 + 侧边栏工具提示 + 控制台面板合并成一个区域（RGN_OR 并集）。
+/// 无有效矩形时返回 None。
 fn build_region(model: &HitModel) -> Option<HRGN> {
     let mut acc: Option<HRGN> = None;
     for f in &model.fences {
         add_rect(&mut acc, f.body);
+        if let Some(tt) = f.tooltip {
+            add_rect(&mut acc, tt);
+        }
     }
     if let Some(c) = &model.console {
         add_rect(&mut acc, c.rect);
@@ -709,7 +740,7 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(HTCLIENT as isize)
         }
-        // DComp 接管合成，擦除由合成器完成
+        // 合成器接管绘制，擦除由合成器完成
         WM_ERASEBKGND => LRESULT(1),
         // 边缘/角标缩放光标：像普通窗口一样给拖拽手势反馈
         WM_SETCURSOR => {
@@ -820,6 +851,16 @@ unsafe extern "system" fn wnd_proc(
             }
             let state = unsafe { &mut *ptr };
             let (mx, my) = client_point(lparam);
+            // 请求 WM_MOUSELEAVE：光标离开窗口时清除 Dock 放大（避免放大「粘」住）
+            unsafe {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+            }
             // 非拖拽期间跟踪悬停：目标变化才上报（避免每帧重绘）。
             if state.drag.is_none() {
                 let key = hover_key(&state.model, mx, my);
@@ -845,7 +886,26 @@ unsafe extern "system" fn wnd_proc(
                     emit_event(hwnd, state, OverlayEvent::ConsoleHover { zone: cz });
                 }
             }
+            // 光标位置变化 → 连续 Dock 放大（位置未变不上报，避免无谓重绘）
+            if state.last_cursor != Some((mx, my)) {
+                state.last_cursor = Some((mx, my));
+                emit_event(hwnd, state, OverlayEvent::CursorMove { x: mx, y: my });
+            }
             on_mouse_move(hwnd, state, mx, my);
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if ptr.is_null() {
+                return LRESULT(0);
+            }
+            let state = unsafe { &mut *ptr };
+            // 清空悬停 + 光标（清除 Dock 放大）
+            state.hovered = None;
+            state.console_hovered = None;
+            state.last_cursor = None;
+            emit_event(hwnd, state, OverlayEvent::HoverLeave);
+            emit_event(hwnd, state, OverlayEvent::CursorLeave);
             LRESULT(0)
         }
         WM_RBUTTONDOWN => {
@@ -1632,6 +1692,7 @@ mod tests {
                         h: 26.0,
                     },
                     id: 0,
+                    tooltip: None,
                 },
                 FenceHit {
                     body: RectF {
@@ -1653,6 +1714,7 @@ mod tests {
                         h: 26.0,
                     },
                     id: 1,
+                    tooltip: None,
                 },
             ],
             icons: vec![],

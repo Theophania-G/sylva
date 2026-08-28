@@ -53,6 +53,9 @@ pub struct Theme {
     pub fence_border: Color,
     pub fence_corner_radius: f32,
     pub fence_padding: f32,
+    /// 模糊背景高斯标准偏差（物理像素，`GaussianBlurEffect::SetStandardDeviation`）。
+    /// GPU 效果按 sigma 直接设；初值 20 对旧观感微调。
+    pub blur_stddev: f32,
     // 标题
     pub title: TextStyle,
     pub title_padding_bottom: f32,
@@ -78,6 +81,7 @@ impl Default for Theme {
             fence_border: Color::rgba(1.0, 1.0, 1.0, 0.42),
             fence_corner_radius: 12.0,
             fence_padding: 14.0,
+            blur_stddev: 20.0,
             title: TextStyle {
                 font_family: "Microsoft YaHei UI",
                 size: 16.0,

@@ -231,6 +231,7 @@ dependencies = [
  "sylva-shell",
  "tracing",
  "windows",
+ "windows-core",
  "windows-numerics",
 ]
 

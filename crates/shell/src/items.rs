@@ -24,7 +24,6 @@ use sylva_core::model::{ItemId, ItemKind};
 // windows-rs 0.62 未自动生成的 shell 属性位（稳定文档值）。
 const SFGAO_LINK: u32 = 0x0001_0000;
 const SFGAO_FOLDER: u32 = 0x2000_0000;
-const SFGAO_FILESYSTEM: u32 = 0x4000_0000;
 /// 枚举器意外的空值（正常情况下 EnumObjects 成功必有枚举器）→ E_FAIL。
 const E_ENUM_EMPTY: i32 = 0x8000_4005u32 as i32;
 

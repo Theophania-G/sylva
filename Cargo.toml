@@ -27,10 +27,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2"
 
 # windows-rs 功能集：随各里程碑按需增补。
-# M1: 壳层接管 + 图标枚举提取 + DirectComposition/D2D/DWrite 渲染
-# windows-numerics：D2D/DComp 的矩阵类型（Matrix3x2）所在 crate，
-# windows crate 内引用它但不在自己的公开路径重导出，需显式声明才能构造矩阵。
+# M1: 壳层接管 + 图标枚举提取 + Win32 渲染基础（D3D11/DXGI/D2D/DWrite/GDI/DWM）
+# windows-numerics：D2D/合成的矩阵与向量类型（Matrix3x2 / Vector2 / Vector3）所在 crate，
+# windows crate 内引用它但不在自己的公开路径重导出，需显式声明才能构造。
 windows-numerics = "0.3.1"
+# implement! 宏生成的 COM/WinRT 实现引用 `::windows_core::` 路径，需显式声明。
+windows-core = "0.62.2"
 
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
@@ -53,7 +55,6 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
     "Win32_Graphics_Gdi",
-    "Win32_Graphics_DirectComposition",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_Direct3D",
@@ -64,4 +65,16 @@ windows = { version = "0.62.2", features = [
     "Win32_Graphics_Dwm",
     "Win32_Security",
     "Win32_Globalization",
+    # M7: WinRT Windows.UI.Composition（真·实时 BackdropBlur）
+    # DispatcherQueue（Compositor::new 前置要求）+ 合成器/效果/绘制表面互操作
+    "System",
+    "Foundation",
+    "Foundation_Numerics",
+    "Graphics_DirectX",
+    "Graphics_Effects",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
 ] }

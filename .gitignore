@@ -7,3 +7,4 @@
 *.exe
 *.pdb
 scripts/installer/target
+/.claude

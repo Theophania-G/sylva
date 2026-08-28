@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! sylva-core (纯模型/算法)  ←  sylva-shell (Windows 壳层)
-//!                              sylva-render (DirectComposition/D2D)
+//!                              sylva-render (Windows.UI.Composition / D2D)
 //!                              fence-ui (egui 设置)
 //!                                       ←  sylva-app (组合根)
 //! ```
@@ -18,5 +18,6 @@ pub mod event;
 pub mod layout;
 pub mod magnet;
 pub mod model;
+pub mod text;
 
 pub use error::{CoreError, Result};

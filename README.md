@@ -11,7 +11,7 @@
 - **D2D 内联文本编辑**：重命名栅栏/图标直接在合成表面内绘制与编辑，。
 - **动效**：栅栏拖动 / 缩放丝滑跟随（过冲回弹）、面板开合淡入淡出、图标悬停放大 + 柔光；空闲 0% CPU。
 - **壳层接管**：低风险接管桌面 WorkerW / DefView，不碰 Wallpaper Engine；任何退出路径都自动恢复桌面图标。
-- **性能**：DirectComposition + Direct2D / DirectWrite 合成，空闲 0% CPU，动画全部走 16ms 定时器逐帧补间。
+- **性能**：Windows.UI.Composition + Direct2D / DirectWrite 合成，模糊走 DWM GPU 实时 BackdropBlur（无截图、无 CPU 高斯），空闲 0% CPU，动画全部走 16ms 定时器逐帧补间。
 
 ## 目录结构
 

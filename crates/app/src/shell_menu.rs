@@ -73,8 +73,12 @@ static MENU_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 
 /// 弹出 `path` 对应的真实 Shell 右键菜单并执行选中命令。
 ///
+/// `linked`：该路径位于链接栅栏的存储文件夹内。链接栅栏即文件夹镜像，
+/// 「移出栅栏」与 Shell「删除」等价（移出不删文件，镜像 ≤4s 就把图标加回来），
+/// 故不再注入「移出栅栏」，避免菜单重复。
+///
 /// 返回 `None` 表示菜单被取消/无法创建；文件路径无效时同样返回 `None`。
-pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32) -> Option<ShellMenuAction> {
+pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<ShellMenuAction> {
     let wide_path = wide(path);
     // 路径 → IShellItem → 默认上下文菜单
     let item: IShellItem = match unsafe {
@@ -118,25 +122,30 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32) -> Option<ShellMenuAction
         return None;
     }
 
-    // 顶部注入 Sylva 命令 + 分隔线；Shell 真实项从位置 2 开始追加。
+    // 顶部注入 Sylva 命令 + 分隔线；Shell 真实项从其后位置开始追加。
+    // 链接栅栏跳过「移出栅栏」（与 Shell「删除」等价，见 `show` 文档）。
     unsafe {
+        let mut pos = 0u32;
+        if !linked {
+            let _ = InsertMenuW(
+                menu,
+                pos,
+                MF_BYPOSITION | MF_STRING,
+                CMD_REMOVE,
+                PCWSTR(wide("移出栅栏").as_ptr()),
+            );
+            pos += 1;
+        }
         let _ = InsertMenuW(
             menu,
-            0,
-            MF_BYPOSITION | MF_STRING,
-            CMD_REMOVE,
-            PCWSTR(wide("移出栅栏").as_ptr()),
-        );
-        let _ = InsertMenuW(
-            menu,
-            1,
+            pos,
             MF_BYPOSITION | MF_STRING,
             CMD_RENAME,
             PCWSTR(wide("重命名").as_ptr()),
         );
-        let _ = InsertMenuW(menu, 2, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = InsertMenuW(menu, pos + 1, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
         // 追加 Shell 项；HRESULT 低 16 位为新增项数（忽略）
-        let _ = ctx2.QueryContextMenu(menu, 3, SHELL_CMD_FIRST, SHELL_CMD_LAST, CMF_NORMAL);
+        let _ = ctx2.QueryContextMenu(menu, pos + 2, SHELL_CMD_FIRST, SHELL_CMD_LAST, CMF_NORMAL);
     }
 
     // 菜单 owner 用消息窗口：它负责把 owner-draw 消息转发给 IContextMenu2/3，

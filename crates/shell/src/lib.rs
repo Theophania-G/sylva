@@ -9,8 +9,6 @@
 //!
 //! 本 crate 是分层架构中最贴近系统的一层，API 以 `sylva-core` 的领域类型为边界。
 
-#![allow(dead_code)] // 骨架阶段；随里程碑推进逐步移除
-
 pub mod com;
 pub mod icons;
 pub mod items;
