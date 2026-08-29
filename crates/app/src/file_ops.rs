@@ -136,6 +136,8 @@ pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: 
         return;
     };
     let fence_id = fence.id;
+    // 旧链接文件夹：换链接后，旧文件夹里的镜像项不再是本栅栏成员（文件保留在磁盘）
+    let old_dir = fence.storage_path.clone();
     // 收集需要移动的库内项（added=true 且路径在旧库内）
     let items_to_move: Vec<String> = fence
         .icon_ids
@@ -160,6 +162,10 @@ pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: 
         // 没有库内项需要移动，直接更新 storage_path
         if let Some(f) = rt.desk.fences.get_mut(fence_idx) {
             f.storage_path = Some(new_dir.to_string());
+        }
+        // 换链接：清理旧链接文件夹里的残留镜像项（文件保留在旧文件夹，不删）
+        if let Some(old) = &old_dir {
+            clear_stale_linked_items(rt, fence_idx, old, new_path);
         }
         // 链接：把文件夹里已有的文件立即镜像进栅栏（此后增删由后台 SyncLibrary 持续同步）
         if reconcile_fences(rt) {
@@ -216,6 +222,10 @@ pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: 
     if let Some(f) = rt.desk.fences.get_mut(fence_idx) {
         f.storage_path = Some(new_dir.to_string());
     }
+    // 换链接：清理旧链接文件夹里的残留镜像项（文件保留在旧文件夹，不删）
+    if let Some(old) = &old_dir {
+        clear_stale_linked_items(rt, fence_idx, old, new_path);
+    }
     // 链接：把文件夹里已有的文件立即镜像进栅栏（此后增删由后台 SyncLibrary 持续同步）
     if reconcile_fences(rt) {
         tracing::info!(fence = fence_id, "链接后新增了文件夹里的栅栏项");
@@ -228,6 +238,45 @@ pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: 
         total = items_to_move.len(),
         "栅栏存储位置已更改"
     );
+}
+
+/// 换链接后清理旧链接文件夹里的残留镜像项：`added` 项路径在旧文件夹内、
+/// 不在新文件夹内，说明它属于旧链接而非新链接。从栅栏整体摘下（引用删除、
+/// 文件保留在旧文件夹磁盘上，用户仍可从资源管理器访问），使栅栏内容与
+/// 新链接文件夹保持一致，不再残留旧文件夹的项。
+fn clear_stale_linked_items(rt: &mut Runtime, fence_idx: usize, old_dir: &str, new_path: &Path) {
+    let stale: Vec<String> = rt
+        .desk
+        .fences
+        .get(fence_idx)
+        .map(|f| {
+            f.icon_ids
+                .iter()
+                .filter(|id| {
+                    rt.desk
+                        .icons
+                        .get(*id)
+                        .map(|ic| {
+                            ic.added
+                                && ic
+                                    .path
+                                    .as_ref()
+                                    .map(|p| {
+                                        path_within(Path::new(old_dir), Path::new(p))
+                                            && !path_within(new_path, Path::new(p))
+                                    })
+                                    .unwrap_or(false)
+                        })
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in stale {
+        tracing::info!(fence = fence_idx, id, "换链接：旧文件夹残留项移出栅栏（文件保留在磁盘）");
+        remove_icon_entirely(rt, &id);
+    }
 }
 
 /// 库同步：检查所有内部库项，`library` 里的文件已被外部删除时，栅栏对应项同步移除。

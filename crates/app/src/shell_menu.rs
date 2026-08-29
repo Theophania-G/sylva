@@ -19,8 +19,9 @@
 //! `InvokeCommand` 必须在其 COM 对象存活期间调用（本函数内保持引用即可）。
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use windows::core::{Interface, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -31,11 +32,12 @@ use windows::Win32::UI::Shell::{
     SHCreateItemFromParsingName, CMF_NORMAL, CMINVOKECOMMANDINFO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, InsertMenuW,
-    RegisterClassW, TrackPopupMenu, HWND_MESSAGE, MF_BYPOSITION, MF_SEPARATOR, MF_STRING,
-    SW_SHOWNORMAL, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP,
-    WM_MEASUREITEM, WM_MENUCHAR, WM_MENUCOMMAND, WM_MENUDRAG, WM_MENURBUTTONUP, WNDCLASSW,
-    WNDCLASS_STYLES, WS_POPUP,
+    CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
+    GetMessageW, InsertMenuW, PostMessageW, PostQuitMessage, RegisterClassW, TrackPopupMenu,
+    TranslateMessage, HWND_MESSAGE, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, MSG, SW_SHOWNORMAL,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
+    WM_MENUCHAR, WM_MENUCOMMAND, WM_MENUDRAG, WM_MENURBUTTONUP, WM_NULL, WNDCLASSW, WNDCLASS_STYLES,
+    WS_POPUP,
 };
 
 /// Shell 项命令 ID 区间（`QueryContextMenu` 的 idCmdFirst..=idCmdLast）。
@@ -49,20 +51,24 @@ const CMD_RENAME: usize = 0x8001;
 
 /// 菜单动作结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShellMenuAction {
+pub enum ShellMenuResult {
     /// 点击了 Sylva 注入的「移出栅栏」。
     Remove,
     /// 点击了 Sylva 注入的「重命名」。
     Rename,
     /// 点击了 Shell 真实命令（已通过 `InvokeCommand` 执行）。
     Invoked,
+    /// 用户取消菜单（Esc / 点击别处关闭）。
+    Canceled,
+    /// 菜单无法创建（路径无效 / COM 失败 / 资源不足等）。
+    Failed,
 }
 
 /// 菜单消息宿主窗口类名（消息窗口，仅用于接收菜单 owner-draw 消息）。
 const MENU_HOST_CLASS: &str = "SylvaMenuHost";
 
 // 菜单期间持有 Shell 菜单接口，供宿主窗口过程转发 owner-draw 消息。
-// 全程主线程、模态（TrackPopupMenu 阻塞），无跨线程访问。
+// 菜单全程在主线程模态运行（TrackPopupMenu 阻塞），无跨线程访问。
 thread_local! {
     static MENU_CTX2: RefCell<Option<IContextMenu2>> = const { RefCell::new(None) };
     static MENU_CTX3: RefCell<Option<IContextMenu3>> = const { RefCell::new(None) };
@@ -71,14 +77,200 @@ thread_local! {
 /// 菜单宿主窗口类只注册一次。
 static MENU_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 
+/// 已预热（加载并初始化过 Shell 扩展）的文件类型键集合。
+static PRIMED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn primed_set() -> std::sync::MutexGuard<'static, HashSet<String>> {
+    PRIMED.get_or_init(|| Mutex::new(HashSet::new())).lock().unwrap()
+}
+
 /// 弹出 `path` 对应的真实 Shell 右键菜单并执行选中命令。
 ///
-/// `linked`：该路径位于链接栅栏的存储文件夹内。链接栅栏即文件夹镜像，
-/// 「移出栅栏」与 Shell「删除」等价（移出不删文件，镜像 ≤4s 就把图标加回来），
-/// 故不再注入「移出栅栏」，避免菜单重复。
+/// `managed`：该项为 Sylva 管理项（库内项/链接镜像项，见 context_menu::handle_context_menu）。
+/// 链接栅栏即文件夹镜像，「移出栅栏」与 Shell「删除」等价（移出不删文件，镜像 ≤4s 就把
+/// 图标加回来），库内项移出同样只此一个意义，故不再注入「移出栅栏」，避免菜单重复。
 ///
-/// 返回 `None` 表示菜单被取消/无法创建；文件路径无效时同样返回 `None`。
-pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<ShellMenuAction> {
+/// 菜单全程在**主线程**上弹出（模态）——与 Windows 桌面右键行为完全一致：
+/// 点击菜单外区域自动收起、Shell 动词（属性/删除/重命名…）能正常激活前台窗口。
+///
+/// 慢 Shell 扩展（如百度网盘 YunShellExt）首次加载会卡线程数秒，若首次右键时
+/// 扩展尚未加载，Windows 会判 UI 线程无响应（AppHangB1）并结束进程——表现即
+/// 「首次右键软件崩溃」。解决：右键前先在**后台线程**把该文件类型的 Shell 扩展
+/// 加载并初始化好（`prime_*`），再走主线程菜单。扩展慢初始化只发生一次（这就
+/// 是「重开软件就正常」的原因），预热后右键即为「第二次」速度。
+pub fn show(path: &str, hwnd: HWND, sx: i32, sy: i32, managed: bool) -> ShellMenuResult {
+    // 类型未预热则后台预热；等待期间泵送消息，窗口保持可响应（不触发 AppHang）
+    ensure_primed(path, hwnd);
+    run_menu(path, hwnd, sx, sy, managed)
+}
+
+/// 启动时预热：把栅栏里已有文件类型的 Shell 扩展在后台加载并初始化。
+/// 每个类型挑一个真实路径做一次 `QueryContextMenu`（就是这一步加载扩展、
+/// 触发慢首次初始化），把成本移到用户交互之前。
+pub fn prime_startup(paths: &[String]) {
+    let keys = unique_type_keys(paths);
+    if keys.is_empty() {
+        return;
+    }
+    let by_key: HashMap<String, String> = paths.iter().map(|p| (type_key(p), p.clone())).collect();
+    let _ = std::thread::Builder::new()
+        .name("sylva-menu-prime".into())
+        .spawn(move || {
+            let _ = sylva_shell::com::init();
+            for key in &keys {
+                if let Some(path) = by_key.get(key) {
+                    let _ = std::panic::catch_unwind(|| prime_one(path));
+                }
+                primed_set().insert(key.clone());
+            }
+        });
+}
+
+/// 该类型的 Shell 菜单尚未预热：后台预热，并在等待期间泵送消息。
+/// 预热完成（或线程创建失败）后返回；调用方随后直接走主线程菜单。
+fn ensure_primed(path: &str, hwnd: HWND) {
+    let key = type_key(path);
+    if primed_set().contains(&key) {
+        return;
+    }
+    let Some(rx) = prime_path_async(path, hwnd) else {
+        return; // 线程创建失败：照常弹菜单（罕见，退化为旧行为）
+    };
+    let _ = pump_until(rx);
+}
+
+/// 后台预热单个文件类型，完成时发一个空消息唤醒等待方的消息泵。
+fn prime_path_async(path: &str, hwnd: HWND) -> Option<std::sync::mpsc::Receiver<()>> {
+    let key = type_key(path);
+    let path = path.to_string();
+    let hwnd_usize = hwnd.0 as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ok = std::thread::Builder::new()
+        .name("sylva-menu-prime".into())
+        .spawn(move || {
+            let _ = sylva_shell::com::init();
+            let _ = std::panic::catch_unwind(|| prime_one(&path));
+            primed_set().insert(key);
+            let _ = tx.send(());
+            // 唤醒等待方的消息泵（等待方阻塞在 GetMessage 上时）
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(hwnd_usize as *mut core::ffi::c_void)),
+                    WM_NULL,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        })
+        .is_ok();
+    if ok {
+        Some(rx)
+    } else {
+        None
+    }
+}
+
+/// 加载并初始化 `path` 文件类型的 Shell 扩展（创建 IContextMenu + QueryContextMenu，
+/// 随后释放）。慢首次初始化（扩展连主进程/建缓存等）就发生在这里。
+fn prime_one(path: &str) -> bool {
+    let wide_path = wide(path);
+    let item: IShellItem = match unsafe {
+        SHCreateItemFromParsingName::<PCWSTR, Option<&IBindCtx>, IShellItem>(
+            PCWSTR(wide_path.as_ptr()),
+            None,
+        )
+    } {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(path, "预热: SHCreateItemFromParsingName 失败: {e}");
+            return false;
+        }
+    };
+    let ctx: IContextMenu = match unsafe {
+        item.BindToHandler::<Option<&IBindCtx>, IContextMenu>(None, &BHID_SFUIObject)
+    } {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(path, "预热: BindToHandler(IContextMenu) 失败: {e}");
+            return false;
+        }
+    };
+    let ctx2: IContextMenu2 = match ctx.cast::<IContextMenu2>() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(path, "预热: 获取 IContextMenu2 失败: {e}");
+            return false;
+        }
+    };
+    let menu = unsafe { CreatePopupMenu().unwrap_or_default() };
+    if menu.is_invalid() {
+        return false;
+    }
+    // QueryContextMenu 触发扩展加载与初始化（慢首次加载就在这一步）
+    let _ = unsafe { ctx2.QueryContextMenu(menu, 0, SHELL_CMD_FIRST, SHELL_CMD_LAST, CMF_NORMAL) };
+    unsafe {
+        let _ = DestroyMenu(menu);
+    }
+    true
+}
+
+/// 文件类型的分类键：有扩展名的按扩展名（小写，含点）区分；无扩展名的文件夹/文件分开。
+fn type_key(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if let Some(ext) = p.extension() {
+        let ext = ext.to_string_lossy().to_lowercase();
+        if !ext.is_empty() {
+            return format!(".{ext}");
+        }
+    }
+    if p.is_dir() {
+        "\u{0}folder".to_string()
+    } else {
+        "\u{0}file".to_string()
+    }
+}
+
+/// 去重后的类型键列表（保持输入顺序）。
+fn unique_type_keys(paths: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for p in paths {
+        let k = type_key(p);
+        if seen.insert(k.clone()) {
+            out.push(k);
+        }
+    }
+    out
+}
+
+/// 主线程泵送消息直到 `rx` 收到值（调用方阻塞）。返回 `None` 表示收到 `WM_QUIT`
+/// （用户退出，已把退出信号转发给外层消息循环）。
+///
+/// 不能空等——窗口必须持续处理消息，否则 Windows 判无响应（AppHangB1）。
+/// 泵送期间到达的 overlay 事件由 App 的 `ReentryGuard` 丢弃（模态期间行为一致）。
+fn pump_until<T>(rx: std::sync::mpsc::Receiver<T>) -> Option<T> {
+    loop {
+        if let Ok(v) = rx.try_recv() {
+            return Some(v);
+        }
+        let mut msg = MSG::default();
+        if unsafe { GetMessageW(&mut msg, None, 0, 0) }.0 == 0 {
+            // WM_QUIT：转发退出信号，放弃等待
+            unsafe {
+                PostQuitMessage(msg.wParam.0 as i32);
+            }
+            return None;
+        }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            let _ = DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// 在**主线程**上弹出 Shell 右键菜单并执行选中命令（模态，阻塞到菜单关闭）。
+/// 由 `show` 调用（见 `show`）；COM 必须在调用线程上已初始化。
+fn run_menu(path: &str, hwnd: HWND, sx: i32, sy: i32, managed: bool) -> ShellMenuResult {
     let wide_path = wide(path);
     // 路径 → IShellItem → 默认上下文菜单
     let item: IShellItem = match unsafe {
@@ -90,7 +282,7 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<S
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(path, "SHCreateItemFromParsingName 失败: {e}");
-            return None;
+            return ShellMenuResult::Failed;
         }
     };
     let ctx: IContextMenu = match unsafe {
@@ -99,7 +291,7 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<S
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(path, "BindToHandler(IContextMenu) 失败: {e}");
-            return None;
+            return ShellMenuResult::Failed;
         }
     };
 
@@ -111,7 +303,7 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<S
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(path, "获取 IContextMenu2 失败: {e}");
-            return None;
+            return ShellMenuResult::Failed;
         }
     };
     tracing::debug!(path, ctx3 = ctx3.is_some(), "Shell 菜单接口就绪");
@@ -119,14 +311,14 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<S
     let menu = unsafe { CreatePopupMenu().unwrap_or_default() };
     if menu.is_invalid() {
         tracing::warn!(path, "创建 Shell 菜单句柄失败");
-        return None;
+        return ShellMenuResult::Failed;
     }
 
     // 顶部注入 Sylva 命令 + 分隔线；Shell 真实项从其后位置开始追加。
-    // 链接栅栏跳过「移出栅栏」（与 Shell「删除」等价，见 `show` 文档）。
+    // Sylva 管理项跳过「移出栅栏」（与「删除」等价，见 `show` 文档）。
     unsafe {
         let mut pos = 0u32;
-        if !linked {
+        if !managed {
             let _ = InsertMenuW(
                 menu,
                 pos,
@@ -157,14 +349,14 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<S
             unsafe {
                 let _ = DestroyMenu(menu);
             }
-            return None;
+            return ShellMenuResult::Failed;
         }
     };
     if !ensure_menu_host_class(hinst) {
         unsafe {
             let _ = DestroyMenu(menu);
         }
-        return None;
+        return ShellMenuResult::Failed;
     }
     let host = match unsafe {
         CreateWindowExW(
@@ -188,7 +380,7 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<S
             unsafe {
                 let _ = DestroyMenu(menu);
             }
-            return None;
+            return ShellMenuResult::Failed;
         }
     };
 
@@ -218,15 +410,15 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<S
     }
 
     match cmd {
-        CMD_REMOVE => Some(ShellMenuAction::Remove),
-        CMD_RENAME => Some(ShellMenuAction::Rename),
+        CMD_REMOVE => ShellMenuResult::Remove,
+        CMD_RENAME => ShellMenuResult::Rename,
         c if (SHELL_CMD_FIRST as usize..=SHELL_CMD_LAST as usize).contains(&c) => {
             // 命令偏移量（低字），cast 成 LPSTR 即 MAKEINTRESOURCE 语义
             let offset = (c - SHELL_CMD_FIRST as usize) as isize;
             let info = CMINVOKECOMMANDINFO {
                 cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
                 fMask: 0,
-                hwnd: _hwnd,
+                hwnd,
                 // MAKEINTRESOURCEA(offset)：按命令索引执行 Shell 动词
                 lpVerb: PCSTR::from_raw(offset as *const u8),
                 lpParameters: PCSTR::null(),
@@ -238,9 +430,9 @@ pub fn show(path: &str, _hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<S
             unsafe {
                 let _ = ctx2.InvokeCommand(&info);
             }
-            Some(ShellMenuAction::Invoked)
+            ShellMenuResult::Invoked
         }
-        _ => None,
+        _ => ShellMenuResult::Canceled,
     }
 }
 

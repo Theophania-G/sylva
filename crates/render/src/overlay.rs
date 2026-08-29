@@ -42,8 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
     GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowDisplayAffinity, SetWindowLongPtrW,
-    ShowWindow, WDA_EXCLUDEFROMCAPTURE,
+    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow,
     TranslateMessage, CS_DBLCLKS, GWLP_USERDATA, HCURSOR, HICON, HTCLIENT, HTTRANSPARENT, ICON_BIG,
     ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MSG,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA,
@@ -193,6 +192,9 @@ pub struct HitModel {
     pub icons: Vec<IconHit>,
     /// 控制台面板；None = 未打开。
     pub console: Option<ConsoleHit>,
+    /// 当前内联编辑框矩形（浮于栅栏之上）：点击内部用于定位光标，不再落到
+    /// 下面的栅栏/图标（否则会误触发「点击别处提交编辑」）。
+    pub edit_rect: Option<RectF>,
 }
 
 /// 缩放拖拽所作用的栅栏区域（决定改宽 / 改高 / 是否随动左上角）。
@@ -245,6 +247,9 @@ pub enum OverlayEvent {
     /// 就地重命名提交后由 App 注入：仅用于触发一次完整重绘 + 命中模型重建
     /// （场景数据已在注入前改好）。
     EditCommitted,
+    /// 鼠标点在编辑框内：`x` 为虚拟屏幕物理坐标，App 据此把光标定位到对应字符。
+    /// 点击编辑框不再穿透到下面的栅栏/图标（避免误触发「点击别处提交」）。
+    EditCaret { x: f32 },
     /// 右键按下：`icon` 为 Some 表示点在图标的图标上，None 表示点在栅栏空白/标题上。
     /// `pos` 为虚拟屏幕坐标（App 层据此弹上下文菜单）。
     ContextMenu {
@@ -501,12 +506,6 @@ impl OverlayWindow {
             )
         };
         let _shown = unsafe { ShowWindow(hwnd, SW_SHOWNA) };
-        // 抓屏排除：`WDA_EXCLUDEFROMCAPTURE` 让本窗口（栅栏/侧边栏）不进入
-        // 屏幕抓取 API 的结果（其他软件/录屏看不到栅栏）。与模糊无关——模糊的
-        // BackdropBrush 采样 DWM 桌面合成，不受 WDA 影响，无需截图。
-        unsafe {
-            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-        }
 
         // 隐藏焦点代理：独立顶层窗口（离屏 1×1，不进任务栏），只负责让进程成为前台，
         // 键盘焦点仍给 overlay（NOACTIVATE 本体不会因点击被激活/提层）。
@@ -687,8 +686,8 @@ fn apply_region(hwnd: HWND, model: &HitModel) {
     }
 }
 
-/// 把全部栅栏矩形 + 侧边栏工具提示 + 控制台面板合并成一个区域（RGN_OR 并集）。
-/// 无有效矩形时返回 None。
+/// 把全部栅栏矩形 + 侧边栏工具提示 + 内联编辑框 + 控制台面板合并成一个区域
+/// （RGN_OR 并集）。无有效矩形时返回 None。
 fn build_region(model: &HitModel) -> Option<HRGN> {
     let mut acc: Option<HRGN> = None;
     for f in &model.fences {
@@ -696,6 +695,11 @@ fn build_region(model: &HitModel) -> Option<HRGN> {
         if let Some(tt) = f.tooltip {
             add_rect(&mut acc, tt);
         }
+    }
+    // 编辑框可能伸出栅栏（如侧边栏贴边时的旁侧编辑框）：并入区域，
+    // 否则框内点击穿透到桌面、光标定位收不到。
+    if let Some(er) = model.edit_rect {
+        add_rect(&mut acc, er);
     }
     if let Some(c) = &model.console {
         add_rect(&mut acc, c.rect);
@@ -1131,6 +1135,14 @@ fn console_resize_zone_at(c: &ConsoleHit, mx: f32, my: f32) -> Option<ResizeZone
 /// 按下：命中控制台控件/标题栏、边缘/角标开始缩放；命中栅栏标题栏/空白开始移动。
 /// 拖拽类动作都捕获鼠标以跟踪拖出窗口的移动。
 fn on_button_down(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
+    // 内联编辑框优先：点编辑框内部 = 把光标定位到点击处，不落到下面的栅栏/图标
+    // （否则会触发「点击别处提交编辑」，用户根本无法点击文本）。
+    if let Some(er) = state.model.edit_rect {
+        if er.contains(mx, my) {
+            emit_event(hwnd, state, OverlayEvent::EditCaret { x: mx });
+            return;
+        }
+    }
     // 控制台优先：面板上的点击不落到栅栏/图标。控件（关闭/勾选/删除/添加）优先于
     // 标题栏拖动——关闭按钮就在标题栏内，先判控件才能「点 × 即关」而非开始拖动。
     if let Some(c) = &state.model.console {
@@ -1548,6 +1560,12 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
 
 /// 双击图标：把下标交给 App 打开对应项。
 fn on_double_click(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
+    // 编辑框内双击同样不穿透（WM_LBUTTONDBLCLK 独立到达，需单独守卫）
+    if let Some(er) = state.model.edit_rect {
+        if er.contains(mx, my) {
+            return;
+        }
+    }
     for icon in &state.model.icons {
         if icon.rect.contains(mx, my) {
             emit_event(
@@ -1719,6 +1737,7 @@ mod tests {
             ],
             icons: vec![],
             console: None,
+            edit_rect: None,
         };
         let rgn = build_region(&model).expect("有栅栏就应有区域");
         unsafe {

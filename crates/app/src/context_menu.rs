@@ -94,7 +94,7 @@ pub(crate) enum FenceMenuAction {
 pub(crate) fn handle_context_menu(rt: &mut Runtime, fence: usize, icon: Option<usize>, _pos: (f32, f32)) {
     let (sx, sy) = cursor_screen();
     if let Some(ii) = icon {
-        // 该项文件路径（多选移出/链接判定也要用）
+        // 该项文件路径（打开/删除判定也要用）
         let path = rt
             .desk
             .fences
@@ -102,15 +102,24 @@ pub(crate) fn handle_context_menu(rt: &mut Runtime, fence: usize, icon: Option<u
             .and_then(|f| f.icon_ids.get(ii))
             .and_then(|id| rt.desk.icons.get(id))
             .and_then(|ic| ic.path.clone());
-        // 路径位于某个链接存储文件夹内：链接栅栏「移出栅栏」与「删除」等价（都删文件，
-        // 否则镜像把图标加回来），菜单不再重复提供「移出栅栏」。
-        let linked = path.as_ref().map(|p| is_linked_path(rt, p)).unwrap_or(false);
+        // 该项是否由 Sylva 管理（库内项 / 链接镜像项 / 虚拟项，added=true）：
+        // 栅栏内容与文件夹同步，「移出栅栏」与「删除」等价（镜像项移出即删文件、
+        // 库内项移出即删引用），菜单不再重复提供「移出栅栏」，只留「删除」。
+        // 真实桌面图标（added=false）不同：移出=回未分组区，删除=回收站，保留「移出」。
+        let managed = rt
+            .desk
+            .fences
+            .get(fence)
+            .and_then(|f| f.icon_ids.get(ii))
+            .and_then(|id| rt.desk.icons.get(id))
+            .map(|ic| ic.added)
+            .unwrap_or(false);
         // 多选集合：右键集合中的任意一项 → 集合操作（打开全部 / 复制 / 移出 / 删除）。
         // 右键未选中的项 → 先单选该项，再走单项逻辑（资源管理器行为）。
         let key = (fence, ii);
         let multi = rt.selected.len() > 1 && rt.selected.contains(&key);
         if multi {
-            match multi_icon_context_menu(rt.hwnd, sx, sy, linked) {
+            match multi_icon_context_menu(rt.hwnd, sx, sy, managed) {
                 Some(MultiMenuAction::Open) => open_selected(rt),
                 Some(MultiMenuAction::Copy) => copy_selected(rt),
                 Some(MultiMenuAction::Remove) => remove_selected(rt),
@@ -123,14 +132,15 @@ pub(crate) fn handle_context_menu(rt: &mut Runtime, fence: usize, icon: Option<u
             rt.selected = vec![key];
         }
         // 有文件路径的项走真实 Shell 右键菜单（等同桌面右键）；虚拟项（无路径）
-        // 退回简版「打开 / 移出栅栏」。
+        // 退回简版「打开」菜单。Shell 菜单在主线程模态弹出，与 Windows 右键
+        // 行为一致；慢扩展已由后台预热（见 shell_menu::show），首次右键不卡死。
         match path {
-            Some(p) => match shell_menu::show(&p, rt.hwnd, sx, sy, linked) {
-                Some(shell_menu::ShellMenuAction::Remove) => remove_fence_icon(rt, fence, ii),
-                Some(shell_menu::ShellMenuAction::Rename) => {
+            Some(p) => match shell_menu::show(&p, rt.hwnd, sx, sy, managed) {
+                shell_menu::ShellMenuResult::Remove => remove_fence_icon(rt, fence, ii),
+                shell_menu::ShellMenuResult::Rename => {
                     start_inplace_rename(rt, EditTarget::Item { fence, icon: ii })
                 }
-                Some(shell_menu::ShellMenuAction::Invoked) => {
+                shell_menu::ShellMenuResult::Invoked => {
                     // 原生动词执行后（如「删除」）：文件若已被移走/删除，立即清掉
                     // 栅栏里的死图标，等价于资源管理器删除后刷新视图。
                     if !std::path::Path::new(&p).exists() {
@@ -146,18 +156,21 @@ pub(crate) fn handle_context_menu(rt: &mut Runtime, fence: usize, icon: Option<u
                         let _ = rt.store.save(&rt.desk);
                     }
                 }
-                // 真实 Shell 菜单没弹出来（路径无效 / COM 异常等）：退回简版菜单，
-                // 保证右键必有反馈，不让「Windows 右击列表」静默消失。
-                None => {
+                // 真实 Shell 菜单没弹出来（路径无效 / COM 异常 / 工作线程失败等）：
+                // 退回简版菜单，保证右键必有反馈，不让「Windows 右击列表」静默消失。
+                shell_menu::ShellMenuResult::Failed => {
                     tracing::warn!(path = %p, "Shell 右键菜单创建失败，退回简版菜单");
-                    match icon_context_menu(rt.hwnd, sx, sy) {
+                    match icon_context_menu(rt.hwnd, sx, sy, managed) {
                         Some(IconMenuAction::Open) => launch_fence_icon(rt, fence, ii),
                         Some(IconMenuAction::Remove) => remove_fence_icon(rt, fence, ii),
                         None => {}
                     }
                 }
+                // 用户取消菜单（Esc / 点击别处）：什么都不做。
+                // 旧实现把「取消」误当成「创建失败」，取消了还会再弹一次简版菜单。
+                shell_menu::ShellMenuResult::Canceled => {}
             },
-            None => match icon_context_menu(rt.hwnd, sx, sy) {
+            None => match icon_context_menu(rt.hwnd, sx, sy, managed) {
                 Some(IconMenuAction::Open) => launch_fence_icon(rt, fence, ii),
                 Some(IconMenuAction::Remove) => remove_fence_icon(rt, fence, ii),
                 None => {}
@@ -231,8 +244,8 @@ pub(crate) fn handle_context_menu(rt: &mut Runtime, fence: usize, icon: Option<u
     }
 }
 
-/// 图标右键菜单：打开 / 移出栅栏。返回选中的动作。
-pub(crate) fn icon_context_menu(hwnd: HWND, sx: i32, sy: i32) -> Option<IconMenuAction> {
+/// 图标右键菜单（简版回退）：打开 / 移出栅栏（Sylva 管理项不提供移出，见 `handle_context_menu`）。
+pub(crate) fn icon_context_menu(hwnd: HWND, sx: i32, sy: i32, managed: bool) -> Option<IconMenuAction> {
     let menu = popup_menu();
     if menu.is_invalid() {
         return None;
@@ -240,8 +253,10 @@ pub(crate) fn icon_context_menu(hwnd: HWND, sx: i32, sy: i32) -> Option<IconMenu
     unsafe {
         let s = wide("打开");
         let _ = AppendMenuW(menu, MF_STRING, MENU_ICON_OPEN, PCWSTR(s.as_ptr()));
-        let s2 = wide("移出栅栏");
-        let _ = AppendMenuW(menu, MF_STRING, MENU_ICON_REMOVE, PCWSTR(s2.as_ptr()));
+        if !managed {
+            let s2 = wide("移出栅栏");
+            let _ = AppendMenuW(menu, MF_STRING, MENU_ICON_REMOVE, PCWSTR(s2.as_ptr()));
+        }
     }
     let cmd = unsafe {
         TrackPopupMenu(
@@ -274,9 +289,9 @@ pub(crate) enum MultiMenuAction {
 }
 
 /// 多选右键菜单：打开全部 / 复制 / 移出栅栏 / 删除。返回选中的动作。
-/// `linked`（右键项在链接栅栏的存储文件夹内）：移出=删除（镜像会加回图标），
-/// 与「删除」重复，跳过「移出栅栏」，只留 打开/复制/删除。
-pub(crate) fn multi_icon_context_menu(hwnd: HWND, sx: i32, sy: i32, linked: bool) -> Option<MultiMenuAction> {
+/// `managed`（右键项为 Sylva 管理项，见 `handle_context_menu`）：移出与「删除」等价，
+/// 跳过「移出栅栏」，只留 打开/复制/删除。
+pub(crate) fn multi_icon_context_menu(hwnd: HWND, sx: i32, sy: i32, managed: bool) -> Option<MultiMenuAction> {
     const M_OPEN: usize = 1;
     const M_COPY: usize = 2;
     const M_REMOVE: usize = 3;
@@ -288,7 +303,7 @@ pub(crate) fn multi_icon_context_menu(hwnd: HWND, sx: i32, sy: i32, linked: bool
     unsafe {
         let _ = AppendMenuW(menu, MF_STRING, M_OPEN, PCWSTR(wide("打开").as_ptr()));
         let _ = AppendMenuW(menu, MF_STRING, M_COPY, PCWSTR(wide("复制").as_ptr()));
-        if !linked {
+        if !managed {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, M_REMOVE, PCWSTR(wide("移出栅栏").as_ptr()));
         }

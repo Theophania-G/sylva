@@ -419,6 +419,36 @@ pub(crate) fn edit_caret_point(rt: &Runtime) -> (i32, i32) {
     (x as i32, y as i32)
 }
 
+/// 鼠标点在编辑框内（x 为虚拟屏幕物理坐标）：把光标定位到对应字符。
+/// 与 `edit_caret_point` 同口径（文本左缘 = rect.x + 10*s，逐字累计宽度），
+/// 半字宽以上的点击进下一格，与常见编辑器行为一致。
+pub(crate) fn edit_click(rt: &mut Runtime, x: f32) {
+    let s = rt.theme.scale;
+    let font = rt.theme.label.size;
+    let Some(edit) = rt.edit.as_mut() else {
+        return;
+    };
+    if !edit.single_line {
+        return; // 多行定位需按 y 判行，重命名不用；待办编辑暂保持键盘定位
+    }
+    let text_left = edit.rect.x + 10.0 * s;
+    let rel = (x - text_left).max(0.0);
+    let line = edit.current_line().to_string();
+    let mut col = 0;
+    let mut acc = 0.0;
+    for (idx, c) in line.char_indices() {
+        let w = label_width(&line[..idx + c.len_utf8()], font)
+            - label_width(&line[..idx], font);
+        if acc + w / 2.0 >= rel {
+            break;
+        }
+        acc += w;
+        col += 1;
+    }
+    edit.col = col;
+    position_ime_window(rt);
+}
+
 /// 双击/右键打开：按显式成员列表反查并启动。
 pub(crate) fn start_inplace_rename(rt: &mut Runtime, target: EditTarget) {
     // 初始文本 + 定位矩形（物理像素）
@@ -636,8 +666,59 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
             })
         }
         FenceLayout::Sidebar => {
-            // 侧边栏无内联标签，就地重命名不适用
-            None
+            // 侧边栏无内联标签：编辑框放在图标旁侧，复用工具提示的定位口径
+            // （纵向 dock 放图标右侧/左侧、垂直居中；横向 dock 放图标下方、水平居中）。
+            let pos = f.appearance.sidebar_pos;
+            let icon_size = f.appearance.icon_size * s;
+            let eff_gap = f.appearance.gap * s + icon_size * 0.5;
+            let (icon_x, icon_y) = if pos == SidebarPosition::Top {
+                // 横向 dock：厚度 = 紧贴放大图标，图标垂直居中，排布自左往右
+                let dock_h = icon_size * 1.5 + 6.0 * s * 2.0;
+                let start_x = f.bounds.x + pad;
+                let start_y = f.bounds.y + (dock_h - icon_size) / 2.0;
+                (
+                    start_x + icon as f32 * (icon_size + eff_gap) - f.scroll,
+                    start_y,
+                )
+            } else {
+                // 纵向 dock：图标在 dock 内水平居中，排布自上往下
+                let dock_w = f.bounds.w.max(icon_size);
+                let start_x = f.bounds.x + (dock_w - icon_size) / 2.0;
+                let start_y = f.bounds.y + pad;
+                (
+                    start_x,
+                    start_y + icon as f32 * (icon_size + eff_gap) - f.scroll,
+                )
+            };
+            let label_h = rt.theme.label.size * 1.6;
+            let text = item_name(rt, fence, icon).unwrap_or_default();
+            let w = (crate::scene::estimate_text_width(&text, rt.theme.label.size) * 1.2
+                + 12.0 * s)
+                .max(label_h);
+            let gap_to_icon = 10.0 * s;
+            let (mut bx, mut by) = match pos {
+                SidebarPosition::Left => (
+                    icon_x + icon_size + gap_to_icon,
+                    icon_y + (icon_size - label_h) / 2.0,
+                ),
+                SidebarPosition::Right => (
+                    icon_x - gap_to_icon - w,
+                    icon_y + (icon_size - label_h) / 2.0,
+                ),
+                SidebarPosition::Top => (
+                    icon_x + icon_size / 2.0 - w / 2.0,
+                    icon_y + icon_size + gap_to_icon,
+                ),
+            };
+            // 钳制到虚拟屏幕内：贴边停靠时编辑框不外溢到屏幕外（宽度超出贴边即可）
+            bx = bx.max(4.0).min((rt.vw - w - 4.0).max(4.0));
+            by = by.max(4.0).min((rt.vh - label_h - 4.0).max(4.0));
+            Some(RectF {
+                x: bx,
+                y: by,
+                w,
+                h: label_h,
+            })
         }
     }
 }

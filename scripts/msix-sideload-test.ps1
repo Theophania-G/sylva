@@ -7,8 +7,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
-$msix = Join-Path $root 'dist\Sylva-0.1.0-x64.msix'
-$signed = Join-Path $root 'dist\Sylva-0.1.0-x64-signed.msix'
+$msix = Join-Path $root 'dist\Sylva-0.1.3-x64.msix'
+$signed = Join-Path $root 'dist\Sylva-0.1.3-x64-signed.msix'
 if (-not (Test-Path $msix)) { throw 'msix not found; run scripts\package-msix.ps1 first' }
 $asciiTmp = Join-Path $env:TEMP 'sylva-msix-test'
 New-Item -ItemType Directory -Force -Path $asciiTmp | Out-Null
@@ -44,8 +44,8 @@ try {
     # 4) install
     Add-AppxPackage -Path $signed
     $installed = $true
-    Copy-Item $signed (Join-Path $root 'dist\Sylva-0.1.0-x64-signed.msix') -Force
-    $app = Get-AppxPackage -Name Sylva.DesktopFences
+    Copy-Item $signed (Join-Path $root 'dist\Sylva-0.1.3-x64-signed.msix') -Force
+    $app = Get-AppxPackage -Name Theophania.Sylva
     if (-not $app) { throw 'package not installed' }
     Write-Host "installed: $($app.PackageFullName)"
 
@@ -59,7 +59,7 @@ try {
 } finally {
     # 6) cleanup: remove package and cert
     if ($installed) {
-        $app = Get-AppxPackage -Name Sylva.DesktopFences -ErrorAction SilentlyContinue
+        $app = Get-AppxPackage -Name Theophania.Sylva -ErrorAction SilentlyContinue
         if ($app) { Remove-AppxPackage -Package $app.PackageFullName }
     }
     $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root', 'CurrentUser')

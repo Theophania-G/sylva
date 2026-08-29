@@ -492,6 +492,13 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         .map_err(|e| sylva_core::CoreError::Render(e.to_string()))?;
     let model = hit_model_from(&rt.theme, &scene, &rt.desk);
     memory::report("首帧呈现后");
+    // Shell 右键菜单预热：后台加载栅栏里文件类型的 Shell 扩展（百度网盘等扩展首次
+    // 加载会卡线程数秒），避免「首次右键」在主线程卡死被判无响应。预热在后台线程，
+    // 与用户交互并行，不拖慢启动。
+    {
+        let paths: Vec<String> = rt.desk.icons.values().filter_map(|ic| ic.path.clone()).collect();
+        shell_menu::prime_startup(&paths);
+    }
     // 启动期一次性分配已就绪：把不再活跃的内存页换出工作集（D3D/场景构建等），
     // 降低常驻内存。GPU 侧资源由驱动管理不受影响，用到时自动换回。
     memory::trim();
@@ -1026,6 +1033,11 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
         }
         OverlayEvent::Char { ch } => {
             edit_char(rt, ch);
+        }
+        OverlayEvent::EditCaret { x } => {
+            // 鼠标点编辑框内文本：光标跳到对应字符（不触发「点击别处提交」，
+            // 该事件由 overlay 命中模型把框内点击单独路由而来）
+            edit_click(rt, x);
         }
         OverlayEvent::ImeStart => {
             if let Some(e) = rt.edit.as_mut() {

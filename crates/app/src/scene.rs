@@ -127,12 +127,16 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
             rt.select_band,
             i,
         );
-        // 正在重命名栅栏标题时，隐藏原始标题避免文字重叠（编辑框独立绘制）
+        // 正在重命名栅栏标题/图标时，隐藏原始文字避免与编辑框重叠（编辑框独立绘制）
         if let Some(edit) = &rt.edit {
-            if let EditTarget::FenceTitle { fence: ef } = edit.target {
-                if ef == i {
-                    sf.title.clear();
+            match edit.target {
+                EditTarget::FenceTitle { fence: ef } if ef == i => sf.title.clear(),
+                EditTarget::Item { fence: ef, icon: ei } if ef == i => {
+                    if let Some(ic) = sf.icons.get_mut(ei) {
+                        ic.label.clear();
+                    }
                 }
+                _ => {}
             }
         }
         // 侧边栏布局：不显示标题（Dock 无标题）；固定为完整 dock，无折叠状态。
@@ -1249,6 +1253,8 @@ pub(crate) fn hit_model_from(theme: &Theme, scene: &Scene, _desk: &Desk) -> HitM
         fences,
         icons,
         console,
+        // 内联编辑框浮于栅栏之上：overlay 据此把框内点击路由到 EditCaret（定位光标）
+        edit_rect: scene.edit.as_ref().map(|e| e.rect),
     }
 }
 
