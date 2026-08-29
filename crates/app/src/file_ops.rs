@@ -274,7 +274,11 @@ fn clear_stale_linked_items(rt: &mut Runtime, fence_idx: usize, old_dir: &str, n
         })
         .unwrap_or_default();
     for id in stale {
-        tracing::info!(fence = fence_idx, id, "换链接：旧文件夹残留项移出栅栏（文件保留在磁盘）");
+        tracing::info!(
+            fence = fence_idx,
+            id,
+            "换链接：旧文件夹残留项移出栅栏（文件保留在磁盘）"
+        );
         remove_icon_entirely(rt, &id);
     }
 }
@@ -510,10 +514,12 @@ pub(crate) fn path_within(root: &Path, path: &Path) -> bool {
 /// 路径是否位于某个栅栏的链接存储文件夹内（「移出栅栏 = 删除文件」判定用）。
 pub(crate) fn is_linked_path(rt: &Runtime, path: &str) -> bool {
     let p = Path::new(path);
-    rt.desk
-        .fences
-        .iter()
-        .any(|f| f.storage_path.as_ref().map(|d| path_within(Path::new(d), p)).unwrap_or(false))
+    rt.desk.fences.iter().any(|f| {
+        f.storage_path
+            .as_ref()
+            .map(|d| path_within(Path::new(d), p))
+            .unwrap_or(false)
+    })
 }
 
 /// 是否属于 Sylva 管理区：内部库或任一栅栏的链接存储文件夹。管理区内的文件删除
@@ -648,10 +654,19 @@ mod tests {
 
     #[test]
     fn path_within_component_aware_case_insensitive() {
-        assert!(path_within(Path::new(r"C:\lib"), Path::new(r"C:\lib\a.txt")));
-        assert!(path_within(Path::new(r"C:\Lib"), Path::new(r"c:\lib\sub\b.txt")));
+        assert!(path_within(
+            Path::new(r"C:\lib"),
+            Path::new(r"C:\lib\a.txt")
+        ));
+        assert!(path_within(
+            Path::new(r"C:\Lib"),
+            Path::new(r"c:\lib\sub\b.txt")
+        ));
         // 组件边界：C:\lib 不匹配 C:\library\f.txt
-        assert!(!path_within(Path::new(r"C:\lib"), Path::new(r"C:\library\f.txt")));
+        assert!(!path_within(
+            Path::new(r"C:\lib"),
+            Path::new(r"C:\library\f.txt")
+        ));
         // 路径即根本身：不算「在内」（严格在内）
         assert!(!path_within(Path::new(r"C:\lib"), Path::new(r"C:\lib")));
         // 父级不是子的前缀

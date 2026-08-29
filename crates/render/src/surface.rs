@@ -8,10 +8,10 @@
 use windows::core::{Interface, Result};
 use windows::Foundation::Size;
 use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
-use windows::UI::Composition::{CompositionDrawingSurface, CompositionGraphicsDevice};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Direct2D::{ID2D1DeviceContext, ID2D1RenderTarget};
 use windows::Win32::System::WinRT::Composition::ICompositionDrawingSurfaceInterop;
+use windows::UI::Composition::{CompositionDrawingSurface, CompositionGraphicsDevice};
 
 /// 合成绘制表面（premultiplied BGRA，与图标像素格式一致）。
 pub struct CompositionSurface {
@@ -55,8 +55,7 @@ impl CompositionSurface {
             bottom: self.height as i32,
         };
         let mut _offset = POINT::default();
-        let target: ID2D1DeviceContext =
-            unsafe { interop.BeginDraw(Some(&rect), &mut _offset)? };
+        let target: ID2D1DeviceContext = unsafe { interop.BeginDraw(Some(&rect), &mut _offset)? };
         // 绘制表面来自合成图形设备，其设备上下文 DPI 跟随系统；显式 96 保证
         // 1 DIP = 1 物理像素（否则高 DPI 下物理像素布局会被目标 DPI 放大而超界）。
         unsafe { target.SetDpi(96.0, 96.0) };

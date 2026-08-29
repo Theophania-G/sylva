@@ -9,13 +9,9 @@
 
 use windows::core::{Interface, Result};
 use windows::System::DispatcherQueueController;
-use windows::UI::Composition::{
-    Compositor as WinCompositor, CompositionGraphicsDevice,
-};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Device, ID2D1Factory, ID2D1Factory1,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1CreateFactory, ID2D1Device, ID2D1Factory, ID2D1Factory1, D2D1_FACTORY_TYPE_SINGLE_THREADED,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
@@ -28,11 +24,11 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, DWRITE_FACTORY_TYPE_ISOLATED,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::Win32::System::WinRT::{
-    CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_STA,
-    DQTYPE_THREAD_CURRENT,
-};
 use windows::Win32::System::WinRT::Composition::ICompositorInterop;
+use windows::Win32::System::WinRT::{
+    CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT,
+};
+use windows::UI::Composition::{CompositionGraphicsDevice, Compositor as WinCompositor};
 
 /// 渲染设备集合。
 pub struct RenderDevice {

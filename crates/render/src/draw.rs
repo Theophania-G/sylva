@@ -212,7 +212,13 @@ fn draw_console(
         right: c.x + c.width,
         bottom: c.y + title_h,
     };
-    draw_text_centered(target, "Sylva", &formats.title_bold, title_lr, &brushes.title);
+    draw_text_centered(
+        target,
+        "Sylva",
+        &formats.title_bold,
+        title_lr,
+        &brushes.title,
+    );
 
     // 标题栏：关闭按钮「✕」+「切换桌面」按钮
     let close_hover = matches!(c.hover_zone, Some(ConsoleZone::Close));
@@ -1076,8 +1082,9 @@ fn draw_fence_inner(
                         radiusX: 6.0 * s,
                         radiusY: 6.0 * s,
                     };
-                    let bg_b =
-                        unsafe { target.CreateSolidColorBrush(&color([0.10, 0.12, 0.16, 0.96]), None)? };
+                    let bg_b = unsafe {
+                        target.CreateSolidColorBrush(&color([0.10, 0.12, 0.16, 0.96]), None)?
+                    };
                     let edge_b = unsafe {
                         target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.35]), None)?
                     };

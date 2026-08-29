@@ -24,12 +24,10 @@ use windows::Win32::Graphics::Gdi::{
     LOGFONTW, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_UPDATENOW,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, IBindCtx,
+    CoCreateInstance, CoInitializeEx, IBindCtx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{
-    PBM_SETBARCOLOR, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH,
-};
+use windows::Win32::UI::Controls::{PBM_SETBARCOLOR, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH};
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -44,12 +42,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos,
     SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED,
     BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, GWLP_USERDATA,
-    HICON, HMENU, IDC_STATIC, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, MESSAGEBOX_STYLE,
-    MSG, SM_CXSCREEN, SM_CYSCREEN, STM_SETICON, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
-    WM_GETTEXT, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW, WS_CAPTION, WS_CHILD,
-    WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP,
-    WS_VISIBLE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_STATIC, IMAGE_ICON, LR_DEFAULTCOLOR, MESSAGEBOX_STYLE,
+    MSG, SM_CXSCREEN, SM_CYSCREEN, STM_SETICON, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+    WM_DESTROY, WM_DPICHANGED, WM_GETTEXT, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW, WS_CAPTION,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE,
 };
 
 /// 内嵌主程序（编译期打包，安装器独立分发）。
@@ -157,7 +155,11 @@ fn make_font(size_dip: i32, weight: i32, dpi: u32) -> HFONT {
 
 /// (标题 20/600, 小节 14/600, 正文 12/400)。
 fn build_fonts(dpi: u32) -> (HFONT, HFONT, HFONT) {
-    (make_font(20, 600, dpi), make_font(14, 600, dpi), make_font(12, 400, dpi))
+    (
+        make_font(20, 600, dpi),
+        make_font(14, 600, dpi),
+        make_font(12, 400, dpi),
+    )
 }
 
 fn msgbox(title: &str, text: &str, error: bool) {
@@ -251,8 +253,12 @@ fn pick_folder(owner: HWND, current: &str) -> Option<String> {
     unsafe {
         let dialog: IFileOpenDialog =
             CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-        dialog.SetTitle(PCWSTR(wide("选择安装文件夹").as_ptr())).ok()?;
-        dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+        dialog
+            .SetTitle(PCWSTR(wide("选择安装文件夹").as_ptr()))
+            .ok()?;
+        dialog
+            .SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+            .ok()?;
         // 预置到当前安装路径，减少翻找
         let cur = wide(current);
         if !cur.is_empty() {
@@ -303,7 +309,10 @@ fn run_install(app: &mut Installer) -> bool {
         set_status(app, "安装失败");
         msgbox(
             "Sylva 安装",
-            &format!("写入主程序失败：\n{}（{e}）", dest.join("sylva.exe").display()),
+            &format!(
+                "写入主程序失败：\n{}（{e}）",
+                dest.join("sylva.exe").display()
+            ),
             true,
         );
         return false;
@@ -345,7 +354,11 @@ fn run_install(app: &mut Installer) -> bool {
     if !ok {
         app.busy = false;
         set_status(app, "安装失败");
-        msgbox("Sylva 安装", "创建快捷方式失败，请关闭安全软件后重试。", true);
+        msgbox(
+            "Sylva 安装",
+            "创建快捷方式失败，请关闭安全软件后重试。",
+            true,
+        );
         return false;
     }
     set_progress(app, 60);
@@ -396,7 +409,10 @@ fn run_install(app: &mut Installer) -> bool {
 
 /// 把脚本编码为 UTF-16LE Base64（PowerShell -EncodedCommand，中文安全）。
 fn encode_command(script: &str) -> String {
-    let bytes: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let bytes: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
     base64_encode(&bytes)
 }
 
@@ -413,8 +429,16 @@ fn base64_encode(data: &[u8]) -> String {
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -431,26 +455,92 @@ fn relayout(app: &mut Installer, dpi: u32) {
         let (cw, ch) = (rc.right, rc.bottom);
 
         // 头部：图标 + 标题 + 副标题（左对齐，间距 12）
-        place(app.htitle, dl(84, dpi), dl(20, dpi), dl(532, dpi), dl(36, dpi));
-        place(app.hsub, dl(84, dpi), dl(62, dpi), dl(532, dpi), dl(22, dpi));
-        place(app.hicon_static, dl(24, dpi), dl(24, dpi), dl(48, dpi), dl(48, dpi));
+        place(
+            app.htitle,
+            dl(84, dpi),
+            dl(20, dpi),
+            dl(532, dpi),
+            dl(36, dpi),
+        );
+        place(
+            app.hsub,
+            dl(84, dpi),
+            dl(62, dpi),
+            dl(532, dpi),
+            dl(22, dpi),
+        );
+        place(
+            app.hicon_static,
+            dl(24, dpi),
+            dl(24, dpi),
+            dl(48, dpi),
+            dl(48, dpi),
+        );
 
         // 安装位置区：小节标题 + 提示 + 路径框 + 浏览按钮
-        place(app.hsection, dl(24, dpi), dl(116, dpi), dl(592, dpi), dl(24, dpi));
-        place(app.hhint, dl(24, dpi), dl(146, dpi), dl(592, dpi), dl(20, dpi));
-        place(app.hpath, dl(24, dpi), dl(178, dpi), dl(496, dpi), dl(32, dpi));
-        place(app.hbtn_browse, dl(532, dpi), dl(178, dpi), dl(84, dpi), dl(32, dpi));
+        place(
+            app.hsection,
+            dl(24, dpi),
+            dl(116, dpi),
+            dl(592, dpi),
+            dl(24, dpi),
+        );
+        place(
+            app.hhint,
+            dl(24, dpi),
+            dl(146, dpi),
+            dl(592, dpi),
+            dl(20, dpi),
+        );
+        place(
+            app.hpath,
+            dl(24, dpi),
+            dl(178, dpi),
+            dl(496, dpi),
+            dl(32, dpi),
+        );
+        place(
+            app.hbtn_browse,
+            dl(532, dpi),
+            dl(178, dpi),
+            dl(84, dpi),
+            dl(32, dpi),
+        );
 
         // 自启勾选框 / 进度条 / 状态
-        place(app.hchk, dl(24, dpi), dl(228, dpi), dl(420, dpi), dl(26, dpi));
-        place(app.hprogress, dl(24, dpi), dl(300, dpi), dl(592, dpi), dl(24, dpi));
-        place(app.hstatus, dl(24, dpi), dl(336, dpi), dl(592, dpi), dl(20, dpi));
+        place(
+            app.hchk,
+            dl(24, dpi),
+            dl(228, dpi),
+            dl(420, dpi),
+            dl(26, dpi),
+        );
+        place(
+            app.hprogress,
+            dl(24, dpi),
+            dl(300, dpi),
+            dl(592, dpi),
+            dl(24, dpi),
+        );
+        place(
+            app.hstatus,
+            dl(24, dpi),
+            dl(336, dpi),
+            dl(592, dpi),
+            dl(20, dpi),
+        );
 
         // 底部按钮：右下角对齐（取消最右，安装靠左并作为默认按钮）
         let btn_y = ch - dl(24, dpi) - dl(36, dpi);
         let btn_right = cw - dl(24, dpi) - dl(96, dpi);
         place(app.hbtn_cancel, btn_right, btn_y, dl(96, dpi), dl(36, dpi));
-        place(app.hbtn_install, btn_right - dl(12, dpi) - dl(96, dpi), btn_y, dl(96, dpi), dl(36, dpi));
+        place(
+            app.hbtn_install,
+            btn_right - dl(12, dpi) - dl(96, dpi),
+            btn_y,
+            dl(96, dpi),
+            dl(36, dpi),
+        );
     }
 
     // DPI 变化时重建字体（布局不变则沿用）
@@ -488,7 +578,12 @@ fn apply_fonts(app: &Installer) {
     }
 }
 
-unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     let app_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     match msg {
         WM_COMMAND => {
@@ -637,8 +732,18 @@ fn main() {
     // 窗口图标（标题栏 / 任务栏 / Alt+Tab）用与主程序相同的 sylva 图标
     unsafe {
         let hicon = app_icon(hinstance);
-        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(hicon.0 as isize)));
-        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(hicon.0 as isize)));
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(hicon.0 as isize)),
+        );
+        let _ = SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(hicon.0 as isize)),
+        );
     }
     // 居中
     unsafe {
@@ -685,7 +790,12 @@ fn main() {
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, app_ptr as isize) };
 
     // 创建子控件：位置/尺寸交给 relayout 统一按 DPI 计算
-    let mk = |class: &[u16], text: &[u16], style: WINDOW_STYLE, ex: WINDOW_EX_STYLE, id: usize| -> HWND {
+    let mk = |class: &[u16],
+              text: &[u16],
+              style: WINDOW_STYLE,
+              ex: WINDOW_EX_STYLE,
+              id: usize|
+     -> HWND {
         unsafe {
             CreateWindowExW(
                 ex,
@@ -780,7 +890,11 @@ fn main() {
     app.hbtn_install = mk(
         &wide("BUTTON"),
         &wide("安装"),
-        st(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_CLIPSIBLINGS.0 | (BS_DEFPUSHBUTTON as u32)),
+        st(WS_CHILD.0
+            | WS_VISIBLE.0
+            | WS_TABSTOP.0
+            | WS_CLIPSIBLINGS.0
+            | (BS_DEFPUSHBUTTON as u32)),
         Default::default(),
         ID_BTN_INSTALL,
     );
@@ -796,7 +910,12 @@ fn main() {
     set_path(&app, &default_path());
     unsafe {
         let _ = SendMessageW(app.hchk, BM_SETCHECK, Some(WPARAM(BST_CHECKED)), None);
-        let _ = SendMessageW(app.hprogress, PBM_SETRANGE32, Some(WPARAM(0)), Some(LPARAM(100)));
+        let _ = SendMessageW(
+            app.hprogress,
+            PBM_SETRANGE32,
+            Some(WPARAM(0)),
+            Some(LPARAM(100)),
+        );
         let _ = SendMessageW(
             app.hprogress,
             PBM_SETBARCOLOR,

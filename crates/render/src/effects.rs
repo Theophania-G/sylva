@@ -26,13 +26,13 @@ use windows::Foundation::{IPropertyValue, PropertyValue};
 use windows::Graphics::Effects::{
     IGraphicsEffect, IGraphicsEffectSource, IGraphicsEffectSource_Impl, IGraphicsEffect_Impl,
 };
-use windows::UI::Composition::CompositionEffectSourceParameter;
 use windows::Win32::Foundation::{E_BOUNDS, E_INVALIDARG};
 use windows::Win32::Graphics::Direct2D::CLSID_D2D1GaussianBlur;
 use windows::Win32::System::WinRT::Graphics::Direct2D::{
-    GRAPHICS_EFFECT_PROPERTY_MAPPING, GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT,
-    IGraphicsEffectD2D1Interop, IGraphicsEffectD2D1Interop_Impl,
+    IGraphicsEffectD2D1Interop, IGraphicsEffectD2D1Interop_Impl, GRAPHICS_EFFECT_PROPERTY_MAPPING,
+    GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT,
 };
+use windows::UI::Composition::CompositionEffectSourceParameter;
 
 #[implement(IGraphicsEffect, IGraphicsEffectSource, IGraphicsEffectD2D1Interop)]
 pub struct GaussianBlurEffect {
@@ -81,9 +81,7 @@ impl IGraphicsEffectD2D1Interop_Impl for GaussianBlurEffect_Impl {
     ) -> Result<()> {
         let s = unsafe { name.to_string() }.unwrap_or_default();
         let (idx, map) = match s.as_str() {
-            "StandardDeviation" | "BlurAmount" => {
-                (0, GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT)
-            }
+            "StandardDeviation" | "BlurAmount" => (0, GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT),
             "Optimization" => (1, GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT),
             "BorderMode" => (2, GRAPHICS_EFFECT_PROPERTY_MAPPING_DIRECT),
             _ => return Err(E_INVALIDARG.into()),

@@ -131,7 +131,10 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
         if let Some(edit) = &rt.edit {
             match edit.target {
                 EditTarget::FenceTitle { fence: ef } if ef == i => sf.title.clear(),
-                EditTarget::Item { fence: ef, icon: ei } if ef == i => {
+                EditTarget::Item {
+                    fence: ef,
+                    icon: ei,
+                } if ef == i => {
                     if let Some(ic) = sf.icons.get_mut(ei) {
                         ic.label.clear();
                     }
@@ -1027,8 +1030,12 @@ pub(crate) fn build_dock_magnify(rt: &mut Runtime, scene_fences: &mut [SceneFenc
         }
         let icon_size = rt.desk.fences[i].appearance.icon_size * rt.theme.scale;
         let gap = rt.desk.fences[i].appearance.gap * rt.theme.scale;
-        let (hovered, scales) =
-            sidebar_magnify(&sf.icons, cursor, icon_size, sidebar_eff_gap(icon_size, gap));
+        let (hovered, scales) = sidebar_magnify(
+            &sf.icons,
+            cursor,
+            icon_size,
+            sidebar_eff_gap(icon_size, gap),
+        );
         for (ic, &sc) in sf.icons.iter_mut().zip(scales.iter()) {
             ic.scale = sc;
         }
@@ -1077,11 +1084,7 @@ pub(crate) struct SidebarGeom {
 /// 纵向 dock（左/右）放图标右侧/左侧、垂直居中对齐；横向 dock（上）放图标下方、
 /// 水平居中对齐。宽度按文本估算 + 20% 安全余量，保证绘制层按同一口径判断时
 /// 不会截断文字。
-pub(crate) fn sidebar_tooltip_rect(
-    geom: &SidebarGeom,
-    icon: &SceneIcon,
-    label: &str,
-) -> RectF {
+pub(crate) fn sidebar_tooltip_rect(geom: &SidebarGeom, icon: &SceneIcon, label: &str) -> RectF {
     let pad = 7.0 * geom.scale;
     let w = (estimate_text_width(label, geom.font_size) * 1.2 + pad * 2.0).max(geom.font_size);
     let h = geom.font_size * 1.6 + pad * 2.0;
@@ -1319,7 +1322,10 @@ mod tests {
     fn clamp_sidebar_work_rect_untouched_when_inside() {
         let wa = Rect::new(0.0, 0.0, 1920.0, 1560.0);
         let dock = Rect::new(0.0, 400.0, 168.0, 472.0);
-        assert_eq!(clamp_sidebar_work_rect(dock, wa, SidebarPosition::Left), dock);
+        assert_eq!(
+            clamp_sidebar_work_rect(dock, wa, SidebarPosition::Left),
+            dock
+        );
     }
 
     /// 纵向 dock：宽 = 紧贴放大图标（1.5×图标 + 两侧 6 逻辑 px 呼吸边），

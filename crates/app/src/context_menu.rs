@@ -10,7 +10,7 @@ pub(crate) const MENU_PASTE: usize = 2500; // 粘贴剪贴板文件
 pub(crate) const MENU_DELETE_FENCE: usize = 5000;
 pub(crate) const MENU_RENAME_FENCE: usize = 6000; // 重命名栅栏（栅栏内就地编辑）
 pub(crate) const MENU_TINT: usize = 7000; // 背景色调子菜单项：+0=默认，+1..=N 对应预设
-                               // 菜单动作的具名常量（match 中常量模式不能含算术）
+                                          // 菜单动作的具名常量（match 中常量模式不能含算术）
 pub(crate) const MENU_LAYOUT_GRID: usize = MENU_LAYOUT;
 pub(crate) const MENU_LAYOUT_LIST: usize = MENU_LAYOUT + 1;
 pub(crate) const MENU_ICON_SIZE_SMALL: usize = MENU_ICON_SIZE;
@@ -91,7 +91,12 @@ pub(crate) enum FenceMenuAction {
 }
 
 /// 处理右键：弹出上下文菜单并执行选中动作（菜单为模态，阻塞到关闭）。
-pub(crate) fn handle_context_menu(rt: &mut Runtime, fence: usize, icon: Option<usize>, _pos: (f32, f32)) {
+pub(crate) fn handle_context_menu(
+    rt: &mut Runtime,
+    fence: usize,
+    icon: Option<usize>,
+    _pos: (f32, f32),
+) {
     let (sx, sy) = cursor_screen();
     if let Some(ii) = icon {
         // 该项文件路径（打开/删除判定也要用）
@@ -245,7 +250,12 @@ pub(crate) fn handle_context_menu(rt: &mut Runtime, fence: usize, icon: Option<u
 }
 
 /// 图标右键菜单（简版回退）：打开 / 移出栅栏（Sylva 管理项不提供移出，见 `handle_context_menu`）。
-pub(crate) fn icon_context_menu(hwnd: HWND, sx: i32, sy: i32, managed: bool) -> Option<IconMenuAction> {
+pub(crate) fn icon_context_menu(
+    hwnd: HWND,
+    sx: i32,
+    sy: i32,
+    managed: bool,
+) -> Option<IconMenuAction> {
     let menu = popup_menu();
     if menu.is_invalid() {
         return None;
@@ -291,7 +301,12 @@ pub(crate) enum MultiMenuAction {
 /// 多选右键菜单：打开全部 / 复制 / 移出栅栏 / 删除。返回选中的动作。
 /// `managed`（右键项为 Sylva 管理项，见 `handle_context_menu`）：移出与「删除」等价，
 /// 跳过「移出栅栏」，只留 打开/复制/删除。
-pub(crate) fn multi_icon_context_menu(hwnd: HWND, sx: i32, sy: i32, managed: bool) -> Option<MultiMenuAction> {
+pub(crate) fn multi_icon_context_menu(
+    hwnd: HWND,
+    sx: i32,
+    sy: i32,
+    managed: bool,
+) -> Option<MultiMenuAction> {
     const M_OPEN: usize = 1;
     const M_COPY: usize = 2;
     const M_REMOVE: usize = 3;
@@ -413,7 +428,12 @@ pub(crate) fn pick_paths(owner: HWND) -> Option<Vec<String>> {
 }
 
 /// 栅栏右键菜单：添加 / 布局 / 图标大小 / 透明度 / 背景色调 / 删除栅栏。
-pub(crate) fn fence_context_menu(rt: &mut Runtime, fence: usize, sx: i32, sy: i32) -> Option<FenceMenuAction> {
+pub(crate) fn fence_context_menu(
+    rt: &mut Runtime,
+    fence: usize,
+    sx: i32,
+    sy: i32,
+) -> Option<FenceMenuAction> {
     let hwnd = rt.hwnd;
     let app = &rt.desk.fences.get(fence)?.appearance;
 
@@ -594,4 +614,3 @@ pub(crate) fn popup_menu() -> HMENU {
 pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
-

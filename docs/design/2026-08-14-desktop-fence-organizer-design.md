@@ -1,7 +1,7 @@
 # 桌面栅栏整理器（Desktop Fence Organizer）设计文档
 
 日期：2026-08-14
-状态：已确认
+状态：已确认（2026-08-29 按实现现状修订：egui → D2D 内联编辑、UI 收敛为 overlay+控制中心、安装器/MSIX 已落地、模糊走 WinRT Composition）
 
 ## 1. 背景与目标
 
@@ -22,20 +22,20 @@
 - 文件夹绑定栅栏（folder-port，可能作为 v1.1 增强）
 - 在线激活服务端（仅预留接口）
 - 跨平台 / 移动端
-- MSIX 安装器
+- 自动更新 / 崩溃上报（v1.1 起再评估）
 
 ## 3. 平台与技术栈
 
 - **平台**：仅 Windows（Win10 / Win11）
 - **语言**：Rust
-- **关键依赖**：`windows-rs`、Direct2D、DirectWrite、DirectComposition、egui（设置 UI）、crossbeam-channel（事件总线）
+- **关键依赖**：`windows-rs`、Direct2D、DirectWrite、DirectComposition、Windows.UI.Composition（实时模糊）、crossbeam-channel（事件总线）
 - **不引入**：tokio、WebView2/Tauri（常驻桌面悬浮层用 WebView 太重）
 
 ## 4. 架构总览
 
 单进程、单实例（mutex 防重复启动）。三个窗口形态：
 - **覆盖层窗口**（每显示器一个）：无边框 layered，`SetParent` 到桌面 worker 层（WorkerW），层级在壁纸之上、其他窗口之下，DirectComposition 驱动视觉树
-- **设置窗口**（egui）：普通窗口
+- **控制中心**：单页「栅栏管理」面板，直接绘制在覆盖层合成表面内（无独立设置窗口）
 - **托盘图标**：`Shell_NotifyIcon`
 
 **线程模型**：主线程跑 Win32 消息循环；后台线程处理枚举/文件/网络；层间用 crossbeam-channel 事件总线通信。
@@ -47,10 +47,9 @@ crates/
 ├── core/      纯 Rust 业务内核：模型·布局·磁吸·动画状态机·配置
 ├── shell/     windows-rs 适配层：接管·图标枚举·图标提取·右键菜单·拖拽·Shell事件·多屏
 ├── render/    Direct2D + DirectWrite + DirectComposition：栅栏绘制·亚克力·图标·文字
-├── ui/        egui 设置界面
-├── update/    自动更新
-├── crash/     崩溃捕获 + 上报
-└── app/       组合根 + 事件总线接线 + 生命周期
+└── app/       组合根 + 主循环 + 事件总线接线 + 生命周期
+
+另含独立工作区 `scripts/installer/`（Rust 图形化安装器，内嵌主程序）。
 ```
 
 **核心引擎（`core/`）零 Win32 依赖，可单元测试。**
@@ -115,7 +114,7 @@ Wallpaper Engine 用同一套 WorkerW/Progman 机制，且会重挂 `SHELLDLL_De
 - **DirectComposition**：每个栅栏一个 Visual，折叠/展开动画为 Visual 的 scale/translate——硬件合成 60fps，几乎零 CPU
 - **Direct2D**：圆角栅栏背景 + 亚克力效果
 - **DirectWrite**：图标标签文字，DPI 感知
-- **亚克力兼容**：Win11 用 `DWM_SYSTEMBACKDROP_TYPE`，Win10 降级半透明纯色
+- **实时模糊（已落地）**：Win11 用 Windows.UI.Composition `BackdropBrush` 真·实时模糊（无截图、无 CPU 高斯），Win10 降级半透明纯色
 
 ## 8. 栅栏与图标归属模型
 
@@ -138,7 +137,7 @@ Wallpaper Engine 用同一套 WorkerW/Progman 机制，且会重挂 `SHELLDLL_De
 ## 10. 商业级配套
 
 - **持久化**：配置 `%APPDATA%`（JSON + 版本迁移）。无学习数据、不需要 SQLite，天然更轻
-- **安装器**：NSIS（MSIX 对壳层集成限制太多，弃用）。传统安装 + 可选开机自启
+- **安装器（已落地）**：Rust 图形化单文件安装器（`scripts/installer/`），传统安装 + 可选开机自启；另有 MSIX 打包工具链用于 Microsoft Store 上架
 - **授权**：v1 离线签名校验 license key，预留在线激活接口
 - **崩溃上报**：panic/异常处理器 → 生 minidump → 用户确认后上传或本地留存
 - **自动更新**：启动异步查 manifest → 下载 → 校验签名 → 重启替换
@@ -159,8 +158,8 @@ Wallpaper Engine 用同一套 WorkerW/Progman 机制，且会重挂 `SHELLDLL_De
 | M1 | 接管图标层 + overlay + 枚举图标 + 画出第一个栅栏 + 图标显示 | 2-3周 |
 | M2 | 拖拽重排/拖入/右键菜单/折叠动画/磁吸 + WE 共存验证 | 2-3周 |
 | M3 | 未分组图标区 + 栅栏标题编辑 + 跨栅栏/到未分组区拖拽完善 | 1-2周 |
-| M4 | 亚克力/动画打磨 + 托盘 + egui 设置界面 | 2周 |
-| M5 | 安装器/授权/自动更新/崩溃上报 | 2周 |
+| M4 | 亚克力/动画打磨 + 托盘 + 控制中心（D2D 内联编辑替代 egui） | 2周 |
+| M5 | 安装器/授权/自动更新/崩溃上报（安装器已落地；授权/更新/上报推迟） | 2周 |
 
 ## 13. 风险与开放问题
 

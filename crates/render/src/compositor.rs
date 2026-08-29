@@ -32,13 +32,13 @@
 
 use windows::core::{Interface, Result, HSTRING};
 use windows::Graphics::Effects::IGraphicsEffect;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
+use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
     CompositionBackdropBrush, CompositionEffectBrush, CompositionGeometricClip,
     CompositionRoundedRectangleGeometry, ContainerVisual, SpriteVisual,
 };
-use windows::UI::Composition::Desktop::DesktopWindowTarget;
-use windows::Win32::Foundation::HWND;
-use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 use sylva_shell::icons::IconData;
@@ -257,13 +257,11 @@ impl Compositor {
             Y: sh as f32,
         });
         // 表面原点（虚拟屏幕坐标）→ 窗口坐标偏移（窗口 (0,0) 即虚拟 origin）
-        let _ = self
-            .content
-            .SetOffset(Vector3 {
-                X: want.x - self.origin.0,
-                Y: want.y - self.origin.1,
-                Z: 0.0,
-            });
+        let _ = self.content.SetOffset(Vector3 {
+            X: want.x - self.origin.0,
+            Y: want.y - self.origin.1,
+            Z: 0.0,
+        });
         self.surface = surface;
         self.surface_rect = want;
     }
@@ -342,10 +340,10 @@ impl Compositor {
                     if let Err(e) = bv.visual.SetOpacity(f.alpha) {
                         tracing::warn!(?e, i, "更新模糊视觉透明度失败");
                     }
-                    if let Err(e) = bv
-                        .geom
-                        .SetCornerRadius(Vector2 { X: corner, Y: corner })
-                    {
+                    if let Err(e) = bv.geom.SetCornerRadius(Vector2 {
+                        X: corner,
+                        Y: corner,
+                    }) {
                         tracing::warn!(?e, i, "更新圆角半径失败");
                     }
                     // 裁剪几何偏移恒为 (0,0)（视觉本地空间），不随栅栏移动而变；
@@ -382,15 +380,28 @@ impl Compositor {
     ) -> Result<BlurVisual> {
         let visual = self.device.compositor.CreateSpriteVisual()?;
         visual.SetBrush(brush)?;
-        visual.SetOffset(Vector3 { X: rect.x, Y: rect.y, Z: 0.0 })?;
-        visual.SetSize(Vector2 { X: rect.w, Y: rect.h })?;
+        visual.SetOffset(Vector3 {
+            X: rect.x,
+            Y: rect.y,
+            Z: 0.0,
+        })?;
+        visual.SetSize(Vector2 {
+            X: rect.w,
+            Y: rect.h,
+        })?;
         visual.SetOpacity(opacity)?;
         let geom = self.device.compositor.CreateRoundedRectangleGeometry()?;
-        geom.SetCornerRadius(Vector2 { X: corner, Y: corner })?;
+        geom.SetCornerRadius(Vector2 {
+            X: corner,
+            Y: corner,
+        })?;
         // 裁剪几何在视觉**本地**坐标空间（Offset 相对被裁剪的视觉，非窗口坐标）：
         // 铺满整个视觉即可，(0,0) + 视觉同尺寸；放置由 visual.SetOffset 负责。
         geom.SetOffset(Vector2 { X: 0.0, Y: 0.0 })?;
-        geom.SetSize(Vector2 { X: rect.w, Y: rect.h })?;
+        geom.SetSize(Vector2 {
+            X: rect.w,
+            Y: rect.h,
+        })?;
         let clip = self
             .device
             .compositor

@@ -437,8 +437,7 @@ pub(crate) fn edit_click(rt: &mut Runtime, x: f32) {
     let mut col = 0;
     let mut acc = 0.0;
     for (idx, c) in line.char_indices() {
-        let w = label_width(&line[..idx + c.len_utf8()], font)
-            - label_width(&line[..idx], font);
+        let w = label_width(&line[..idx + c.len_utf8()], font) - label_width(&line[..idx], font);
         if acc + w / 2.0 >= rel {
             break;
         }
@@ -522,7 +521,12 @@ pub(crate) fn apply_rename(rt: &mut Runtime, target: EditTarget, new_name: &str)
 /// 重命名栅栏内图标（编辑程序名字）：改的是磁盘上的真实文件名（快捷方式保持
 /// `.lnk`/`.url`/`.appref-ms` 扩展名），改名后重建元数据、位图与引用。
 /// 返回内容是否真的变化。
-pub(crate) fn commit_icon_rename(rt: &mut Runtime, fence: usize, icon: usize, new_name: &str) -> bool {
+pub(crate) fn commit_icon_rename(
+    rt: &mut Runtime,
+    fence: usize,
+    icon: usize,
+    new_name: &str,
+) -> bool {
     let (id, path, current) = match rt.desk.fences.get(fence).and_then(|f| f.icon_ids.get(icon)) {
         Some(id) => match rt.desk.icons.get(id) {
             Some(ic) => (id.clone(), ic.path.clone(), ic.display_name.clone()),
@@ -734,4 +738,3 @@ pub(crate) fn fence_title_rect(rt: &Runtime, fence: usize) -> RectF {
         h: rt.theme.title.size * 1.6,
     }
 }
-

@@ -68,9 +68,9 @@ pub(crate) use sylva_core::model::{
 };
 pub(crate) use sylva_render::{
     run_message_loop, Compositor, ConsoleHit, ConsoleZone, FenceHit, HitModel, IconHit,
-    ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone, Scene,
-    SceneConsole, SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, Theme,
-    GRIP_SIZE, WM_APP_QUIT, WM_SYLVA_INJECT,
+    ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone, Scene, SceneConsole,
+    SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, Theme, GRIP_SIZE,
+    WM_APP_QUIT, WM_SYLVA_INJECT,
 };
 pub(crate) use sylva_shell::icons::IconData;
 pub(crate) use sylva_shell::items::DesktopItem;
@@ -496,7 +496,12 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
     // 加载会卡线程数秒），避免「首次右键」在主线程卡死被判无响应。预热在后台线程，
     // 与用户交互并行，不拖慢启动。
     {
-        let paths: Vec<String> = rt.desk.icons.values().filter_map(|ic| ic.path.clone()).collect();
+        let paths: Vec<String> = rt
+            .desk
+            .icons
+            .values()
+            .filter_map(|ic| ic.path.clone())
+            .collect();
         shell_menu::prime_startup(&paths);
     }
     // 启动期一次性分配已就绪：把不再活跃的内存页换出工作集（D3D/场景构建等），

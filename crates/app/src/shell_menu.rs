@@ -36,8 +36,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, InsertMenuW, PostMessageW, PostQuitMessage, RegisterClassW, TrackPopupMenu,
     TranslateMessage, HWND_MESSAGE, MF_BYPOSITION, MF_SEPARATOR, MF_STRING, MSG, SW_SHOWNORMAL,
     TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM,
-    WM_MENUCHAR, WM_MENUCOMMAND, WM_MENUDRAG, WM_MENURBUTTONUP, WM_NULL, WNDCLASSW, WNDCLASS_STYLES,
-    WS_POPUP,
+    WM_MENUCHAR, WM_MENUCOMMAND, WM_MENUDRAG, WM_MENURBUTTONUP, WM_NULL, WNDCLASSW,
+    WNDCLASS_STYLES, WS_POPUP,
 };
 
 /// Shell 项命令 ID 区间（`QueryContextMenu` 的 idCmdFirst..=idCmdLast）。
@@ -81,7 +81,10 @@ static MENU_CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
 static PRIMED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn primed_set() -> std::sync::MutexGuard<'static, HashSet<String>> {
-    PRIMED.get_or_init(|| Mutex::new(HashSet::new())).lock().unwrap()
+    PRIMED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
 }
 
 /// 弹出 `path` 对应的真实 Shell 右键菜单并执行选中命令。
@@ -335,7 +338,13 @@ fn run_menu(path: &str, hwnd: HWND, sx: i32, sy: i32, managed: bool) -> ShellMen
             CMD_RENAME,
             PCWSTR(wide("重命名").as_ptr()),
         );
-        let _ = InsertMenuW(menu, pos + 1, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = InsertMenuW(
+            menu,
+            pos + 1,
+            MF_BYPOSITION | MF_SEPARATOR,
+            0,
+            PCWSTR::null(),
+        );
         // 追加 Shell 项；HRESULT 低 16 位为新增项数（忽略）
         let _ = ctx2.QueryContextMenu(menu, pos + 2, SHELL_CMD_FIRST, SHELL_CMD_LAST, CMF_NORMAL);
     }

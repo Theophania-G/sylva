@@ -206,4 +206,3 @@ pub(crate) fn icon_hover_active(rt: &Runtime) -> bool {
         .map(|h| tween_progress(h.t0, h.dur, Instant::now()).is_some())
         .unwrap_or(false)
 }
-

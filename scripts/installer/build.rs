@@ -23,7 +23,9 @@ fn main() {
     match res.compile() {
         Ok(()) => {}
         Err(e) => {
-            eprintln!("[build.rs] winres 嵌入图标/清单失败（{e}）——检查 MSVC/Windows SDK 资源编译器");
+            eprintln!(
+                "[build.rs] winres 嵌入图标/清单失败（{e}）——检查 MSVC/Windows SDK 资源编译器"
+            );
             std::process::exit(1);
         }
     }
