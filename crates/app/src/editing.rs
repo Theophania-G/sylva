@@ -415,7 +415,8 @@ pub(crate) fn edit_caret_point(rt: &Runtime) -> (i32, i32) {
     let before: String = edit.current_line().chars().take(edit.col).collect();
     let w = label_width(&before, font) + label_width(&edit.comp, font);
     let x = edit.rect.x + 10.0 * s + w;
-    let y = edit.rect.y + 10.0 * s + edit.line as f32 * (font * 1.5) + font * 0.8;
+    // 文本布局顶 = 剪裁上内缩（4·scale）：光标/IME 候选窗口随文字定位，与绘制一致。
+    let y = edit.rect.y + 4.0 * s + edit.line as f32 * (font * 1.5) + font * 0.8;
     (x as i32, y as i32)
 }
 
@@ -639,16 +640,19 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
     match f.appearance.layout {
         FenceLayout::Grid => {
             let icon_size = f.appearance.icon_size * s;
-            let cell_w = icon_size + f.appearance.gap * s;
-            let row_h = icon_size + rt.theme.icon_caption_gap + rt.theme.label.size * 1.6;
+            // 与 scene.rs 同口径：格宽保底 + 两行标签行高（否则编辑框/后续行错位）。
+            let cell_w = grid_cell_w(icon_size, f.appearance.gap * s);
+            let row_h = grid_row_h(&rt.theme, icon_size);
             let cols = ((inner_w / cell_w).floor() as usize).max(1);
             let ix = content_left + (icon % cols) as f32 * cell_w;
             let iy = content_top + (icon / cols) as f32 * row_h - f.scroll;
+            // 编辑框覆盖两行标签区（含上下剪裁余量 8·scale，见 draw_inline_edit 的 4·scale 内缩）。
+            let edit_h = rt.theme.label.size * GRID_CAPTION_H_MULT + 8.0 * s;
             Some(RectF {
                 x: ix - 2.0,
                 y: iy + icon_size + rt.theme.icon_caption_gap,
-                w: icon_size + 4.0,
-                h: rt.theme.label.size * 1.6,
+                w: cell_w - 2.0,
+                h: edit_h,
             })
         }
         FenceLayout::List => {
@@ -662,11 +666,13 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
             let col_gap = LIST_COL_GAP * s;
             let name_w = (inner_w - col_gap * 3.0 - type_w - mod_w - size_w).max(60.0 * s);
             let iy = content_top + header_h + icon as f32 * row_h - f.scroll;
+            // 编辑框高度 = 文本行高 + 上下剪裁余量（同 Grid：见 Grid 分支注释）。
+            let edit_h = label_h + 8.0 * s;
             Some(RectF {
                 x: content_left + list_icon + rt.theme.list_label_gap,
                 y: iy + (list_icon - label_h) / 2.0,
                 w: name_w,
-                h: label_h,
+                h: edit_h,
             })
         }
         FenceLayout::Sidebar => {
@@ -695,6 +701,8 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
                 )
             };
             let label_h = rt.theme.label.size * 1.6;
+            // 编辑框高度 = 文本行高 + 上下剪裁余量（同 Grid：见 Grid 分支注释）。
+            let edit_h = label_h + 8.0 * s;
             let text = item_name(rt, fence, icon).unwrap_or_default();
             let w = (crate::scene::estimate_text_width(&text, rt.theme.label.size) * 1.2
                 + 12.0 * s)
@@ -716,12 +724,12 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
             };
             // 钳制到虚拟屏幕内：贴边停靠时编辑框不外溢到屏幕外（宽度超出贴边即可）
             bx = bx.max(4.0).min((rt.vw - w - 4.0).max(4.0));
-            by = by.max(4.0).min((rt.vh - label_h - 4.0).max(4.0));
+            by = by.max(4.0).min((rt.vh - edit_h - 4.0).max(4.0));
             Some(RectF {
                 x: bx,
                 y: by,
                 w,
-                h: label_h,
+                h: edit_h,
             })
         }
     }
@@ -731,10 +739,13 @@ pub(crate) fn item_label_rect(rt: &Runtime, fence: usize, icon: usize) -> Option
 pub(crate) fn fence_title_rect(rt: &Runtime, fence: usize) -> RectF {
     let f = &rt.desk.fences[fence];
     let pad = rt.theme.fence_padding;
+    // 编辑框按实际绘制字号（`draw_inline_edit` 恒用 label 格式）定高：
+    // 文本行高 + 上下剪裁余量（绘制时内缩 4·scale），字形完整显示且垂直居中。
+    let h = rt.theme.label.size * 1.6 + 8.0 * rt.theme.scale;
     RectF {
         x: f.bounds.x + pad,
         y: f.bounds.y + pad,
         w: (f.bounds.w - 2.0 * pad).max(1.0),
-        h: rt.theme.title.size * 1.6,
+        h,
     }
 }

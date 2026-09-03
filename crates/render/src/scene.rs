@@ -48,6 +48,9 @@ pub struct SceneFence {
     pub layout: FenceLayout,
     /// 列表布局的详情列位置；网格布局为 None。
     pub list_cols: Option<ListColumns>,
+    /// 网格布局的格宽（物理像素）；列表/侧边栏为 0。网格标签两行排布与
+    /// 悬停工具提示是否截断的判断共用（标签横跨整格绘制）。
+    pub grid_cell_w: f32,
     /// 当前内容滚动偏移（物理像素）。
     pub scroll: f32,
     /// 可滚动范围（0 = 内容不超出可视区，无滚动条）。
@@ -78,6 +81,18 @@ pub struct SceneFence {
     /// 侧边栏悬停工具提示矩形（物理像素，由 App 层按屏幕边界计算好，
     /// 可延伸到栅栏之外）；None = 不显示。非侧边栏布局恒为 None。
     pub tooltip_rect: Option<RectF>,
+    /// 侧边栏图标拖动排序状态：Some 时绘制拖动中的图标位置。
+    pub reorder_drag: Option<ReorderDrag>,
+}
+
+/// 侧边栏图标拖动排序的渲染状态。
+#[derive(Debug, Clone, Copy)]
+pub struct ReorderDrag {
+    /// 被拖动的图标在 `icon_ids` 中的下标。
+    pub icon_idx: usize,
+    /// 当前光标位置（虚拟屏幕物理像素，图标中心跟随此位置）。
+    pub cursor_x: f32,
+    pub cursor_y: f32,
 }
 
 impl SceneFence {
@@ -289,6 +304,7 @@ mod tests {
             icons: vec![],
             layout: FenceLayout::Grid,
             list_cols: None,
+            grid_cell_w: 72.0,
             scroll: 0.0,
             scroll_max: 0.0,
             scroll_view: 0.0,
@@ -303,6 +319,7 @@ mod tests {
             blur: false,
             alpha: 1.0,
             tooltip_rect: None,
+            reorder_drag: None,
         }
     }
 

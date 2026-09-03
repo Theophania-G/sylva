@@ -14,8 +14,8 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Device, ID2D1Factory, ID2D1Factory1, D2D1_FACTORY_TYPE_SINGLE_THREADED,
 };
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
-    D3D_FEATURE_LEVEL_11_1,
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_0,
+    D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
@@ -67,26 +67,51 @@ impl RenderDevice {
             })?
         };
 
-        // D3D11 设备需带 BGRA 支持才能被 D2D 使用
+        // D3D11 设备需带 BGRA 支持才能被 D2D 使用。
+        // 硬件驱动失败（远程桌面 / 虚拟机 / 驱动异常）时降级 WARP 软件光栅化——
+        // 糊但能启动，不再「启动即退出」。这是无 GPU 环境兼容性的核心兜底。
+        const HW_FLS: [D3D_FEATURE_LEVEL; 4] = [
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0,
+        ];
+        const WARP_FLS: [D3D_FEATURE_LEVEL; 3] = [
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0,
+        ];
         let mut d3d: Option<ID3D11Device> = None;
-        unsafe {
-            D3D11CreateDevice(
-                None, // 默认适配器
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[
-                    D3D_FEATURE_LEVEL_11_1,
-                    D3D_FEATURE_LEVEL_11_0,
-                    D3D_FEATURE_LEVEL_10_1,
-                ]),
-                D3D11_SDK_VERSION,
-                Some(&mut d3d),
-                None,
-                None,
-            )?
-        };
-        let d3d = d3d.expect("D3D11CreateDevice 成功返回后必有设备");
+        let mut last_err: Option<windows::core::Error> = None;
+        for (driver, fls) in [
+            (D3D_DRIVER_TYPE_HARDWARE, &HW_FLS[..]),
+            (D3D_DRIVER_TYPE_WARP, &WARP_FLS[..]),
+        ] {
+            let mut dev: Option<ID3D11Device> = None;
+            let r = unsafe {
+                D3D11CreateDevice(
+                    None, // 默认适配器
+                    driver,
+                    HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(fls),
+                    D3D11_SDK_VERSION,
+                    Some(&mut dev),
+                    None,
+                    None,
+                )
+            };
+            match r {
+                Ok(()) => {
+                    d3d = dev;
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let d3d = d3d.ok_or_else(|| {
+            last_err.expect("至少尝试过一次 D3D11CreateDevice，必有错误可上报")
+        })?;
 
         let dxgi: IDXGIDevice = d3d.cast()?;
         let d2d: ID2D1Factory =

@@ -231,6 +231,17 @@ pub(crate) fn change_fence_storage(rt: &mut Runtime, fence_idx: usize, new_dir: 
         tracing::info!(fence = fence_id, "链接后新增了文件夹里的栅栏项");
     }
     let _ = rt.store.save(&rt.desk);
+    // 若旧路径在内部库下且已空，自动删除（避免残留空文件夹）
+    if let Some(old) = &old_dir {
+        let old_path = std::path::Path::new(old);
+        if old_path.is_dir()
+            && old_path.starts_with(&rt.library)
+            && old_path.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false)
+        {
+            let _ = std::fs::remove_dir(old_path);
+            tracing::info!("已清理空的旧库子文件夹: {}", old);
+        }
+    }
     tracing::info!(
         fence = fence_id,
         new_dir,
@@ -310,7 +321,7 @@ pub(crate) fn reconcile_library(rt: &mut Runtime) -> bool {
     changed
 }
 
-/// 双向同步总入口：内部库删除同步（`reconcile_library`）+ 每个链接栅栏的文件夹镜像。
+/// 双向同步总入口：内部库删除同步 + 链接栅栏文件夹镜像。
 /// 返回是否有任何项被增/删（调用方据此持久化；重绘由事件尾部统一完成）。
 pub(crate) fn reconcile_fences(rt: &mut Runtime) -> bool {
     let mut changed = reconcile_library(rt);
@@ -321,6 +332,7 @@ pub(crate) fn reconcile_fences(rt: &mut Runtime) -> bool {
     }
     changed
 }
+
 
 /// 镜像一个链接栅栏的存储文件夹（文件夹 → 栅栏方向）：资源管理器里对文件夹的
 /// 新增/删除/改名 ≤ 后台 `SyncLibrary` 周期（4s）反映到栅栏。栅栏即文件夹——

@@ -1,6 +1,7 @@
 //! 场景构建：从领域模型 + 主题排布出渲染场景（栅栏/侧边栏/控制台/命中模型）。
 
 use crate::*;
+use sylva_render::scene::ReorderDrag;
 pub(crate) fn system_dark_mode() -> bool {
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
@@ -48,75 +49,121 @@ pub(crate) fn label_width(text: &str, font_size: f32) -> f32 {
 
 /// 首次运行：把全部图标按稳定顺序平分成两个演示栅栏，并建立图标元数据。
 /// 已有布局时不作任何改动（栅栏是用户显式成员列表）。
-pub(crate) fn seed_fences(desk: &mut Desk, items: &[DesktopItem], theme: &Theme) {
-    if !desk.fences.is_empty() || items.is_empty() {
+/// 用 Shell API 获取用户桌面文件夹的真实路径。
+/// 支持用户自定义桌面位置（如移到 D 盘），比 `USERPROFILE\Desktop` 可靠。
+fn shell_desktop_path() -> Option<String> {
+    use windows::Win32::UI::Shell::{FOLDERID_Desktop, SHGetKnownFolderPath, KNOWN_FOLDER_FLAG};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    unsafe {
+        let pwstr = SHGetKnownFolderPath(&FOLDERID_Desktop, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let path = pwstr.to_string().ok()?;
+        CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+        if std::path::Path::new(&path).is_dir() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+}
+
+pub(crate) fn seed_fences(desk: &mut Desk, _items: &[DesktopItem], _theme: &Theme) {
+    if !desk.fences.is_empty() {
         return;
     }
-    // 元数据落库：图标按稳定 id 持久化，供渲染标签与成员引用
-    for it in items {
-        let mut ic = Icon::new(it.id.clone(), it.display_name.clone(), it.kind);
-        ic.path = it.path.clone();
-        if let Some(p) = it.path.as_deref() {
-            sylva_core::details::enrich(&mut ic, p);
-        }
-        desk.icons.entry(it.id.clone()).or_insert(ic);
-    }
-
-    let cell = theme.icon_size + theme.icon_gap;
-    let w = theme.fence_padding * 2.0 + theme.icon_cols as f32 * cell - theme.icon_gap;
-    let empty: HashMap<String, u64> = HashMap::new();
-    let (a, b) = items.split_at(items.len().div_ceil(2));
-
-    let f1 = Fence {
-        id: desk.next_fence_id(),
-        title: Some("常用".into()),
-        monitor_id: 0,
-        bounds: Rect::new(80.0, 80.0, w, 0.0), // 高度由布局自适应
-        state: FenceState::Expanded,
-        icon_ids: a.iter().map(|it| it.id.clone()).collect(),
-        appearance: FenceAppearance::default(),
-        scroll: 0.0,
-        storage_path: None,
-        sidebar_collapsed: false,
-    };
-    // 用布局算出的高度定位第二个栅栏（首栅栏暂不在 desk 中，单独算一次几何）
-    let sf1 = layout_fence(theme, &f1, desk, &empty, None, &[], None, 0);
-
-    // 第二个栅栏用「透明」风格演示多种背景风格
-    let app2 = FenceAppearance {
-        bg_style: FenceStyle::Outline,
+    // 默认创建一个侧边栏栅栏，链接到用户桌面文件夹。
+    // 不预填 icon_ids——reconcile_fences 会在启动后扫描文件夹自动同步内容。
+    // 用 Shell API 获取真实桌面路径（用户可能把桌面移到 D 盘等非默认位置）。
+    let desktop_dir = shell_desktop_path().unwrap_or_default();
+    let appearance = FenceAppearance {
+        layout: FenceLayout::Sidebar,
+        sidebar_pos: SidebarPosition::Top,
         ..FenceAppearance::default()
     };
-    let f2 = Fence {
+    let storage = if desktop_dir.is_empty() {
+        None
+    } else {
+        Some(desktop_dir)
+    };
+    tracing::info!(
+        storage = storage.as_deref().unwrap_or("(无)"),
+        "首次运行：已创建默认桌面侧边栏（内容将由文件夹同步填充）"
+    );
+    let f = Fence {
         id: desk.next_fence_id(),
-        title: Some("其他".into()),
+        title: Some("桌面".into()),
         monitor_id: 0,
-        bounds: Rect::new(80.0, 80.0 + sf1.height + 40.0, w, 0.0),
+        bounds: Rect::new(0.0, 0.0, 0.0, 0.0), // sidebar_dock_rect 会在启动锚定时计算
         state: FenceState::Expanded,
-        icon_ids: b.iter().map(|it| it.id.clone()).collect(),
-        appearance: app2,
+        icon_ids: Vec::new(), // 空——由 reconcile_fences 从文件夹同步填充
+        appearance,
         scroll: 0.0,
-        storage_path: None,
+        storage_path: storage,
         sidebar_collapsed: false,
     };
-
-    desk.fences.push(f1);
-    desk.fences.push(f2);
-    tracing::info!(
-        fences = desk.fences.len(),
-        icons = desk.icons.len(),
-        "首次运行：已创建演示栅栏布局"
-    );
+    desk.fences.push(f);
 }
 
 /// 把整个桌面状态排布成场景（每个栅栏按网格/列表排布；内容超出滚动）。
 pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
     let alpha = fence_alpha(rt, now);
     let mut scene = Scene::new(rt.vw, rt.vh);
+    // 拖动排序：用当前帧的实际渲染位置重排图标（后处理，避免坐标系问题）
+    if let Some((fence_idx, icon_idx, mx, my)) = rt.sidebar_reorder {
+        if let Some(sf) = scene.fences.get_mut(fence_idx) {
+            let n = sf.icons.len();
+            if n > 1 && icon_idx < n {
+                let is_vert = rt.desk.fences[fence_idx].appearance.sidebar_pos != SidebarPosition::Top;
+                // 找光标最接近的非拖动图标
+                let mut insert_at = n - 1;
+                let mut best_dist = f32::MAX;
+                for (k, ic) in sf.icons.iter().enumerate() {
+                    if k == icon_idx { continue; }
+                    let cx = ic.x + ic.size / 2.0;
+                    let cy = ic.y + ic.size / 2.0;
+                    let (dist, cursor, center) = if is_vert {
+                        ((my - cy).abs(), my, cy)
+                    } else {
+                        ((mx - cx).abs(), mx, cx)
+                    };
+                    if dist < best_dist {
+                        best_dist = dist;
+                        insert_at = if cursor < center { k } else { k + 1 };
+                    }
+                }
+                let insert_at = insert_at.min(n - 1);
+                // 重排图标向量
+                let dragged = sf.icons.remove(icon_idx);
+                let adj_insert = if insert_at > icon_idx { insert_at - 1 } else { insert_at };
+                sf.icons.insert(adj_insert, dragged);
+                // 更新 icon_ids 顺序（与 icons 向量同步）
+                if let Some(f) = rt.desk.fences.get_mut(fence_idx) {
+                    let id = f.icon_ids.remove(icon_idx);
+                    f.icon_ids.insert(adj_insert, id);
+                }
+                // 被拖图标跟随光标
+                if let Some(ic) = sf.icons.get_mut(adj_insert) {
+                    ic.x = if is_vert { ic.x } else { mx - ic.size / 2.0 };
+                    ic.y = if is_vert { my - ic.size / 2.0 } else { ic.y };
+                }
+                sf.reorder_drag = Some(ReorderDrag {
+                    icon_idx: adj_insert,
+                    cursor_x: mx,
+                    cursor_y: my,
+                });
+            }
+        }
+    }
     for i in 0..rt.desk.fences.len() {
         // 视觉矩形：拖拽/缩放补间期间用插值（模型已是目标值，场景跟随动画）
         let mut f = rt.desk.fences[i].clone();
         f.bounds = fence_visual_rect(rt, i);
+        // 栅栏几何圆整到整数物理像素：D2D 在非整数坐标上描 2px 圆角边会发虚，
+        // 圆整后边界落在像素网格上，配合 Per-Monitor V2（无 DWM 位图缩放）即清晰锐利。
+        // 自动高度栅栏 bounds.h==0 圆整后仍是 0，真实高度由 layout_fence 计算后再圆整。
+        f.bounds.x = f.bounds.x.round();
+        f.bounds.y = f.bounds.y.round();
+        f.bounds.w = f.bounds.w.round();
+        f.bounds.h = f.bounds.h.round();
         let mut sf = layout_fence(
             &rt.theme,
             &f,
@@ -161,6 +208,11 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
         }
         // 回写钳制后的滚动偏移（滚轮事件在 layout 内被限制在 [0, max_scroll]）
         rt.desk.fences[i].scroll = sf.scroll;
+        // 回写实际渲染高度：自动高度栅栏（bounds.h==0）的碰撞检测/夹屏按真实高度算。
+        // 只在有对应下标时回写（AddFence 后同一帧 scene 已重建，长度必对齐）。
+        if i < rt.last_layout_h.len() {
+            rt.last_layout_h[i] = sf.height;
+        }
         // 模糊风格无需任何截图/CPU 处理：`sf.blur` 已由 layout_fence 置位，
         // 合成器据此建/删该栅栏的 BackdropBrush + GaussianBlurEffect 视觉（GPU 实时）。
         scene.fences.push(sf);
@@ -188,20 +240,43 @@ pub(crate) fn build_scene(rt: &mut Runtime, now: Instant) -> Scene {
     scene
 }
 
-/// 栅栏整体透明度（0=隐藏，1=完全显示）：桌面切换补间推进中取插值，否则按模式取终值。
+/// 控制中心内容总高度（自适应，不含屏幕夹制）。
 pub(crate) fn console_full_height(desk: &Desk, s: f32) -> f32 {
     let title_h = CONSOLE_TITLE_H * s;
     let rows = desk.fences.len().min(CONSOLE_FENCE_MAX_ROWS) as f32 * CONSOLE_FENCE_ROW_H * s;
+    // 详情区行数按当前布局/风格动态计算（与 build_console 保持一致）
+    let detail_rows = detail_visible_rows(desk, s);
     title_h
         + 8.0 * s
         + rows
         + 8.0 * s
-        + CONSOLE_FENCE_DETAIL_H * s
+        + detail_rows
         + 8.0 * s
         // 添加 / 删除栅栏 / 切换桌面 三个等宽按钮 + 两处间隙
         + CONSOLE_ADD_BTN_H * s * 3.0
         + 8.0 * s * 2.0
         + 12.0 * s.clamp(CONSOLE_MIN_H * s, CONSOLE_MAX_H * s)
+}
+
+/// 详情区可见行的总高度（行高 30px × 可见行数 + 标签行 24px）。
+fn detail_visible_rows(desk: &Desk, s: f32) -> f32 {
+    let app = desk.fences.iter().find(|f| !f.icon_ids.is_empty() || desk.fences.len() == 1);
+    let (layout, style) = app
+        .map(|f| (f.appearance.layout, f.appearance.bg_style))
+        .unwrap_or((FenceLayout::Grid, FenceStyle::Glass));
+    let mut n = 1usize; // 布局选择（始终显示）
+    if layout != FenceLayout::List {
+        n += 1; // 图标大小（列表布局隐藏）
+    }
+    n += 1; // 背景风格（始终显示）
+    if style != FenceStyle::Blur {
+        n += 1; // 背景色调（模糊时隐藏）
+    }
+    n += 1; // 更改位置（始终显示）
+    if layout == FenceLayout::Sidebar {
+        n += 1; // 侧边栏位置（仅侧边栏）
+    }
+    24.0 * s + n as f32 * 30.0 * s
 }
 
 /// 控制中心面板矩形（物理像素，虚拟屏幕坐标）。
@@ -213,11 +288,17 @@ pub(crate) fn console_full_height(desk: &Desk, s: f32) -> f32 {
 /// 尺寸策略：未手动缩放过（`console_size == None`）时宽取 `CONSOLE_W`、高取
 /// `console_full_height`（标签页/内容自适应）；用户拖边缘/角缩放后
 /// `console_size` 落为具体宽高（钳制在最小尺寸之上），之后高度固定、超出滚动。
-pub(crate) fn console_geometry(desk: &Desk, theme: &Theme, vw: f32, _vh: f32, panel: f32) -> RectF {
+pub(crate) fn console_geometry(desk: &Desk, theme: &Theme, vw: f32, vh: f32, panel: f32) -> RectF {
     let s = theme.scale;
-    let auto_full_h = console_full_height(desk, s);
+    let margin = CONSOLE_MARGIN * s;
+    // 可用高度：屏幕高度减去上下边距（面板不应溢出屏幕）
+    let max_h = (vh - 2.0 * margin).max(CONSOLE_MIN_H * s);
+    let auto_full_h = console_full_height(desk, s).min(max_h);
     let (w, full_h) = match desk.console_size {
-        Some((w, h)) => (w.max(CONSOLE_MIN_W * s), h.max(CONSOLE_MIN_H * s)),
+        Some((w, h)) => (
+            w.max(CONSOLE_MIN_W * s),
+            h.max(CONSOLE_MIN_H * s).min(max_h),
+        ),
         None => (CONSOLE_W * s, auto_full_h),
     };
     // 允许小幅过冲（展开回弹），1.12 上限避免面板瞬时过高
@@ -225,8 +306,8 @@ pub(crate) fn console_geometry(desk: &Desk, theme: &Theme, vw: f32, _vh: f32, pa
     let (x, y) = match desk.console_pos {
         Some(p) => (p.x, p.y),
         None => (
-            (vw - w - CONSOLE_MARGIN * s).max(8.0 * s),
-            (CONSOLE_MARGIN * s).max(8.0 * s),
+            (vw - w - margin).max(8.0 * s),
+            margin.max(8.0 * s),
         ),
     };
     RectF { x, y, w, h }
@@ -292,112 +373,103 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
         let app = &desk.fences[sel].appearance;
         let btn_h = 24.0 * s;
         let label_w = 40.0 * s;
-        let row_y = |i: usize| d.y + 24.0 * s + i as f32 * 30.0 * s;
+        // 动态行号：根据当前布局/风格跳过不适用的行，避免留空白
+        let mut row = 0usize;
+        let row_y = |r: usize| d.y + 24.0 * s + r as f32 * 30.0 * s;
+        // 布局选择（始终显示）
         let layout_grid = RectF {
             x: d.x + label_w,
-            y: row_y(0),
+            y: row_y(row),
             w: 52.0 * s,
             h: btn_h,
         };
         let layout_list = RectF {
             x: layout_grid.x + layout_grid.w + 6.0 * s,
-            y: row_y(0),
+            y: row_y(row),
             w: 52.0 * s,
             h: btn_h,
         };
         let layout_sidebar = RectF {
             x: layout_list.x + layout_list.w + 6.0 * s,
-            y: row_y(0),
+            y: row_y(row),
             w: 52.0 * s,
             h: btn_h,
         };
-        let size_s = RectF {
-            x: d.x + label_w,
-            y: row_y(1),
-            w: 40.0 * s,
-            h: btn_h,
+        row += 1;
+        // 图标大小（列表布局隐藏；网格/侧边栏显示）
+        let show_size = app.layout != FenceLayout::List;
+        let (size_s, size_m, size_l) = if show_size {
+            let sy = row_y(row);
+            let s_s = RectF { x: d.x + label_w, y: sy, w: 40.0 * s, h: btn_h };
+            let s_m = RectF { x: s_s.x + s_s.w + 6.0 * s, y: sy, w: 40.0 * s, h: btn_h };
+            let s_l = RectF { x: s_m.x + s_m.w + 6.0 * s, y: sy, w: 40.0 * s, h: btn_h };
+            row += 1;
+            (s_s, s_m, s_l)
+        } else {
+            (RectF::default(), RectF::default(), RectF::default())
         };
-        let size_m = RectF {
-            x: size_s.x + size_s.w + 6.0 * s,
-            y: row_y(1),
-            w: 40.0 * s,
-            h: btn_h,
-        };
-        let size_l = RectF {
-            x: size_m.x + size_m.w + 6.0 * s,
-            y: row_y(1),
-            w: 40.0 * s,
-            h: btn_h,
-        };
+        // 背景风格（始终显示）
         let style_glass = RectF {
             x: d.x + label_w,
-            y: row_y(2),
+            y: row_y(row),
             w: 48.0 * s,
             h: btn_h,
         };
         let style_outline = RectF {
             x: style_glass.x + style_glass.w + 6.0 * s,
-            y: row_y(2),
+            y: row_y(row),
             w: 48.0 * s,
             h: btn_h,
         };
         let style_filled = RectF {
             x: style_outline.x + style_outline.w + 6.0 * s,
-            y: row_y(2),
+            y: row_y(row),
             w: 48.0 * s,
             h: btn_h,
         };
         let style_blur = RectF {
             x: style_filled.x + style_filled.w + 6.0 * s,
-            y: row_y(2),
+            y: row_y(row),
             w: 48.0 * s,
             h: btn_h,
         };
-        let sw = 18.0 * s;
-        let gap = 6.0 * s;
-        let tint_y = row_y(3) + (btn_h - sw) / 2.0;
-        let tint_default = RectF {
-            x: d.x + label_w,
-            y: tint_y,
-            w: sw,
-            h: sw,
+        row += 1;
+        // 背景色调（模糊风格下隐藏——模糊无色调可调）
+        let show_tint = app.bg_style != FenceStyle::Blur;
+        let (tint_default, tints) = if show_tint {
+            let sw = 18.0 * s;
+            let gap = 6.0 * s;
+            let tint_y = row_y(row) + (btn_h - sw) / 2.0;
+            let td = RectF { x: d.x + label_w, y: tint_y, w: sw, h: sw };
+            let mut ts = Vec::with_capacity(TINT_PRESETS.len());
+            let mut x = td.x + sw + gap;
+            for _ in TINT_PRESETS {
+                ts.push(RectF { x, y: tint_y, w: sw, h: sw });
+                x += sw + gap;
+            }
+            row += 1;
+            (td, ts)
+        } else {
+            (RectF::default(), Vec::new())
         };
-        let mut tints = Vec::with_capacity(TINT_PRESETS.len());
-        let mut x = tint_default.x + sw + gap;
-        for _ in TINT_PRESETS {
-            tints.push(RectF {
-                x,
-                y: tint_y,
-                w: sw,
-                h: sw,
-            });
-            x += sw + gap;
-        }
-        // 「更改位置…」按钮（存储位置行，第 5 行）
+        // 「更改位置…」按钮（始终显示）
         let storage_btn = RectF {
             x: d.x + label_w,
-            y: row_y(4),
+            y: row_y(row),
             w: 120.0 * s,
             h: btn_h,
         };
-        // 侧边栏位置按钮（第 6 行，仅 Sidebar 布局有效）
-        let sidebar_left = RectF {
-            x: d.x + label_w,
-            y: row_y(5),
-            w: 40.0 * s,
-            h: btn_h,
-        };
-        let sidebar_top = RectF {
-            x: sidebar_left.x + sidebar_left.w + 6.0 * s,
-            y: row_y(5),
-            w: 40.0 * s,
-            h: btn_h,
-        };
-        let sidebar_right = RectF {
-            x: sidebar_top.x + sidebar_top.w + 6.0 * s,
-            y: row_y(5),
-            w: 40.0 * s,
-            h: btn_h,
+        row += 1;
+        // 侧边栏位置按钮（仅侧边栏布局有；网格/列表隐藏）
+        let show_sidebar_pos = app.layout == FenceLayout::Sidebar;
+        let (sidebar_left, sidebar_top, sidebar_right) = if show_sidebar_pos {
+            let sy = row_y(row);
+            let sl = RectF { x: d.x + label_w, y: sy, w: 40.0 * s, h: btn_h };
+            let st = RectF { x: sl.x + sl.w + 6.0 * s, y: sy, w: 40.0 * s, h: btn_h };
+            let sr = RectF { x: st.x + st.w + 6.0 * s, y: sy, w: 40.0 * s, h: btn_h };
+            (sl, st, sr)
+        } else {
+            (RectF::default(), RectF::default(), RectF::default())
         };
         Some(SceneFenceDetail {
             rect: d,
@@ -434,8 +506,8 @@ pub(crate) fn build_console(rt: &Runtime, anim: &ConsoleAnim) -> SceneConsole {
     let btn_w = panel.w - 2.0 * CONSOLE_PAD * s;
     let btn_h = CONSOLE_ADD_BTN_H * s;
     let btn_gap = 8.0 * s;
-    let btn_top =
-        list_top + fence_shown as f32 * row_h_f + 8.0 * s + CONSOLE_FENCE_DETAIL_H * s + 8.0 * s;
+    let detail_h = detail_visible_rows(desk, s);
+    let btn_top = list_top + fence_shown as f32 * row_h_f + 8.0 * s + detail_h + 8.0 * s;
     let add_fence = RectF {
         x: panel.x + CONSOLE_PAD * s,
         y: btn_top,
@@ -561,14 +633,16 @@ pub(crate) fn layout_fence(
         .filter(|&(fi, _)| fi == fence_idx)
         .map(|(_, r)| r);
 
-    let (icons, scroll, scroll_max, scroll_view, list_cols, height) = match app.layout {
+    let (icons, scroll, scroll_max, scroll_view, list_cols, grid_cell_w, height) =
+        match app.layout {
         FenceLayout::Grid => {
             let icon_size = app.icon_size * scale;
             let gap = app.gap * scale;
-            // 横向步距：图标 + 图标间距；纵向步距：图标 + 标签间距 + 标签高。
-            // 二者必须分开——共用一个 cell 会让标签叠进下一行图标（行列重叠根因）。
-            let cell_w = icon_size + gap;
-            let row_h = icon_size + theme.icon_caption_gap + theme.label.size * 1.6;
+            // 横向步距：图标 + 间距，且保底 ≥1.5×图标宽——旧配置 gap 偏小时两行
+            // 文件名标签也有足够横向空间（标签横跨整格绘制，见 draw.rs）。
+            let cell_w = grid_cell_w(icon_size, gap);
+            // 纵向步距：图标 + 标签间距 + 两行标签高（与 draw.rs 的标签框一致）。
+            let row_h = grid_row_h(theme, icon_size);
             let cols = ((inner_w / cell_w).floor() as usize).max(1);
             let rows_n = n.div_ceil(cols).max(1);
             // 内容总高 = 每行（图标 + 标签）累加，末行标签也有高度
@@ -594,7 +668,7 @@ pub(crate) fn layout_fence(
                 scroll,
                 icon_size,
             );
-            (icons, scroll, scroll_max, view, None, h)
+            (icons, scroll, scroll_max, view, None, cell_w, h)
         }
         FenceLayout::List => {
             let label_h = theme.label.size * 1.6;
@@ -646,7 +720,7 @@ pub(crate) fn layout_fence(
                 scroll,
                 list_icon,
             );
-            (icons, scroll, scroll_max, view, Some(cols), h)
+            (icons, scroll, scroll_max, view, Some(cols), 0.0, h)
         }
         FenceLayout::Sidebar => {
             let icon_size = app.icon_size * scale;
@@ -684,7 +758,7 @@ pub(crate) fn layout_fence(
                     scroll,
                     true,
                 );
-                (icons, scroll, scroll_max, view, None, h)
+                (icons, scroll, scroll_max, view, None, 0.0, h)
             } else {
                 // 横向（上侧）：厚度 = 紧贴放大图标的停靠高（图标垂直居中），
                 // 宽 = 内容自适应或用户缩放。
@@ -709,7 +783,7 @@ pub(crate) fn layout_fence(
                     scroll,
                     false,
                 );
-                (icons, scroll, scroll_max, view, None, h)
+                (icons, scroll, scroll_max, view, None, 0.0, h)
             }
         }
     };
@@ -746,17 +820,18 @@ pub(crate) fn layout_fence(
     } else {
         [0.0, 0.0, 0.0, 0.45]
     };
-    let border_width = MEDIUM_BORDER_WIDTH * scale;
+    let border_width = (MEDIUM_BORDER_WIDTH * scale).round().max(1.0);
 
     SceneFence {
-        x: fence.bounds.x,
-        y: fence.bounds.y,
-        width: fence.bounds.w,
-        height,
+        x: fence.bounds.x.round(),
+        y: fence.bounds.y.round(),
+        width: fence.bounds.w.round(),
+        height: height.round(),
         title: fence.title.clone().unwrap_or_default(),
         icons,
         layout: app.layout,
         list_cols,
+        grid_cell_w,
         scroll,
         scroll_max,
         scroll_view,
@@ -773,6 +848,7 @@ pub(crate) fn layout_fence(
         alpha: 1.0,
         // 侧边栏工具提示矩形由 build_dock_magnify 在第二遍计算后填入
         tooltip_rect: None,
+        reorder_drag: None,
     }
 }
 
@@ -805,6 +881,17 @@ pub(crate) fn grid_icons(
             scale: 1.0,
         })
         .collect()
+}
+
+/// 网格格宽：图标宽 + 间距，且不小于 1.5 倍图标宽。两行文件名标签横跨整格绘制，
+/// 格宽不足会退化成单行截断——保底保证旧配置（gap 偏小）也有足够的横向空间。
+pub(crate) fn grid_cell_w(icon_size: f32, gap: f32) -> f32 {
+    (icon_size + gap).max(icon_size * 1.5)
+}
+
+/// 网格行高：图标 + 标签间距 + 两行标签高（与 draw.rs 的标签框同一 `GRID_CAPTION_H_MULT`）。
+pub(crate) fn grid_row_h(theme: &Theme, icon_size: f32) -> f32 {
+    icon_size + theme.icon_caption_gap + theme.label.size * GRID_CAPTION_H_MULT
 }
 
 /// 列表排布全部图标位置（单列纵向；滚动用 `scroll` 平移，绘制时裁剪）。
@@ -842,7 +929,7 @@ pub(crate) fn list_icons(
 /// 侧边栏 dock 厚度（纵向 dock 的宽 / 横向 dock 的高）：放大后最大图标宽（1.5×图标）
 /// 加两侧呼吸边（每侧 6 逻辑 px）。紧贴放大图标——放大到 1.5× 的图标恰在 dock 内居中，
 /// 两侧各留少量边距，不被 dock 边缘裁掉。
-fn sidebar_dock_thickness(icon_size: f32, scale: f32) -> f32 {
+pub(crate) fn sidebar_dock_thickness(icon_size: f32, scale: f32) -> f32 {
     let margin = 6.0 * scale;
     icon_size * 1.5 + margin * 2.0
 }
@@ -881,10 +968,11 @@ pub(crate) fn clamp_sidebar_work_rect(r: Rect, wa: Rect, pos: SidebarPosition) -
     out
 }
 
-/// 夹到屏幕内：纵向（左/右）宽 = 紧贴放大图标（1.5×图标 + 两侧 6 逻辑 px 呼吸边），
-/// 高随图标数自适应但不超过屏幕高（超出则滚动）；横向（上）厚度对称于纵向、
-/// 宽自适应但不超过屏幕宽。`fence.appearance.sidebar_pos` 决定停靠在哪一侧。
-pub(crate) fn sidebar_dock_rect(vw: f32, vh: f32, scale: f32, fence: &Fence) -> Rect {
+/// 夹到工作区内：纵向（左/右）宽 = 紧贴放大图标（1.5×图标 + 两侧 6 逻辑 px 呼吸边），
+/// 高随图标数自适应但不超过工作区高（超出则滚动）；横向（上）厚度对称于纵向、
+/// 宽自适应但不超过工作区宽。`fence.appearance.sidebar_pos` 决定停靠在哪一侧。
+/// `wa` 为工作区矩形（扣除任务栏后），dock 不会越过任务栏。
+pub(crate) fn sidebar_dock_rect(scale: f32, fence: &Fence, wa: &Rect) -> Rect {
     let icon_size = fence.appearance.icon_size * scale;
     let gap = fence.appearance.gap * scale;
     let pad = 12.0 * scale;
@@ -898,28 +986,28 @@ pub(crate) fn sidebar_dock_rect(vw: f32, vh: f32, scale: f32, fence: &Fence) -> 
     match fence.appearance.sidebar_pos {
         SidebarPosition::Left | SidebarPosition::Right => {
             // 紧贴放大图标：宽 = 1.5×图标 + 两侧呼吸边，图标在 dock 内居中（放大围绕
-            // 中心展开），1.5× 时恰被完整容纳。高 = 内容 + 上下内边距，夹到屏幕内。
+            // 中心展开），1.5× 时恰被完整容纳。高 = 内容 + 上下内边距，夹到工作区内。
             let w = sidebar_dock_thickness(icon_size, scale);
-            let h = (content + pad * 2.0).clamp(100.0 * scale, vh);
+            let h = (content + pad * 2.0).clamp(100.0 * scale, wa.h);
             let x = if fence.appearance.sidebar_pos == SidebarPosition::Left {
-                0.0
+                wa.x
             } else {
-                (vw - w).max(0.0)
+                (wa.right() - w).max(wa.x)
             };
-            Rect::new(x, ((vh - h) / 2.0).max(0.0), w, h)
+            Rect::new(x, wa.y + ((wa.h - h) / 2.0).max(0.0), w, h)
         }
         SidebarPosition::Top => {
             // 横向 dock：厚度对称于纵向（1.5×图标 + 两侧呼吸边），宽随内容自适应。
             let h = sidebar_dock_thickness(icon_size, scale);
-            let w = (content + pad * 2.0).clamp(100.0 * scale, vw);
-            Rect::new(((vw - w) / 2.0).max(0.0), 0.0, w, h)
+            let w = (content + pad * 2.0).clamp(100.0 * scale, wa.w);
+            Rect::new(wa.x + ((wa.w - w) / 2.0).max(0.0), wa.y, w, h)
         }
     }
 }
 
 /// 侧边栏排布全部图标位置（单行/单列，无标签；滚动用 `scroll` 平移）。
 /// `vertical` = true 时纵向排列（左/右停靠），false 时横向排列（上侧停靠）。
-#[allow(clippy::too_many_arguments)]
+/// 不处理排序——排序在 build_scene 中用实际渲染位置后处理。
 pub(crate) fn sidebar_icons(
     _fence: &Fence,
     rows: &[(String, u64, String, String, String)],
@@ -930,13 +1018,14 @@ pub(crate) fn sidebar_icons(
     scroll: f32,
     vertical: bool,
 ) -> Vec<SceneIcon> {
+    let step = icon_size + gap;
     rows.iter()
         .enumerate()
         .map(|(i, (label, bitmap, ct, cm, cs))| {
             let (x, y) = if vertical {
-                (start_x, start_y + i as f32 * (icon_size + gap) - scroll)
+                (start_x, start_y + i as f32 * step - scroll)
             } else {
-                (start_x + i as f32 * (icon_size + gap) - scroll, start_y)
+                (start_x + i as f32 * step - scroll, start_y)
             };
             SceneIcon {
                 label: label.clone(),
@@ -1022,7 +1111,17 @@ pub(crate) fn build_dock_magnify(rt: &mut Runtime, scene_fences: &mut [SceneFenc
             && my >= of.y
             && my <= of.y + of.height
     });
-    let cursor = if in_other { None } else { Some((mx, my)) };
+    // 光标落在控制中心面板内 → 同样不放大（避免面板上方触发 Dock 工具提示）
+    let in_console = rt.desk.console_open && {
+        let cp = console_geometry(&rt.desk, &rt.theme, rt.vw, rt.vh, 1.0);
+        mx >= cp.x && mx <= cp.x + cp.w && my >= cp.y && my <= cp.y + cp.h
+    };
+    // 拖动排序期间保持放大但禁用工具提示（避免 tooltip 反复触发 surface 重建）
+    let cursor = if in_other || in_console {
+        None
+    } else {
+        Some((mx, my))
+    };
     for (i, sf) in scene_fences.iter_mut().enumerate() {
         let layout = rt.desk.fences[i].appearance.layout;
         if layout != FenceLayout::Sidebar {
@@ -1043,22 +1142,33 @@ pub(crate) fn build_dock_magnify(rt: &mut Runtime, scene_fences: &mut [SceneFenc
         // 仅当光标进入影响半径（hovered 为 Some）才覆盖 rt.hover，否则会把
         // 其他栅栏上的悬停一并清掉。
         sf.hover_icon = hovered;
+        // 拖动排序期间抑制工具提示（避免反复出现/消失导致 surface 重建闪烁）
         if let Some(hi) = hovered {
             rt.hover = Some((i, hi));
-            // 工具提示：完整名称放在图标旁侧，可延伸到 dock 之外（绘制层不受
-            // 栅栏裁剪限制），位置由这里按屏幕边界计算好。
-            if let Some(icon) = sf.icons.get(hi) {
-                let geom = SidebarGeom {
-                    vw: rt.vw,
-                    vh: rt.vh,
-                    font_size: rt.theme.label.size,
-                    scale: rt.theme.scale,
-                    pos: rt.desk.fences[i].appearance.sidebar_pos,
-                };
-                sf.tooltip_rect = Some(sidebar_tooltip_rect(&geom, icon, &icon.label));
+            if rt.sidebar_reorder.is_none() {
+                if let Some(icon) = sf.icons.get(hi) {
+                    let geom = SidebarGeom {
+                        vw: rt.vw,
+                        vh: rt.vh,
+                        font_size: rt.theme.label.size,
+                        scale: rt.theme.scale,
+                        pos: rt.desk.fences[i].appearance.sidebar_pos,
+                    };
+                    sf.tooltip_rect = Some(sidebar_tooltip_rect(&geom, icon, &icon.label));
+                }
             }
         } else {
             sf.tooltip_rect = None;
+        }
+        // 侧边栏拖动排序状态传递给场景
+        if let Some((fence_idx, icon_idx, cursor_x, cursor_y)) = rt.sidebar_reorder {
+            if fence_idx == i {
+                sf.reorder_drag = Some(ReorderDrag {
+                    icon_idx,
+                    cursor_x,
+                    cursor_y,
+                });
+            }
         }
     }
 }
@@ -1144,6 +1254,7 @@ pub(crate) fn hit_model_from(theme: &Theme, scene: &Scene, _desk: &Desk) -> HitM
             },
             id: fi,
             tooltip: f.tooltip_rect,
+            is_sidebar: f.layout == FenceLayout::Sidebar,
         });
         // 可视区（列头之下）：滚出可视区的图标不参与命中，避免误点。
         let view_top = f.content_top + f.list_cols.map(|c| c.header_h).unwrap_or(0.0);
@@ -1334,7 +1445,8 @@ mod tests {
     fn sidebar_dock_rect_vertical_fits_within_screen() {
         // scale=2：icon=96, gap=20, eff_gap=68, pad=24；3 图标内容 = 3*96+2*68 = 424
         let f = test_fence(FenceLayout::Sidebar);
-        let r = sidebar_dock_rect(3072.0, 1920.0, 2.0, &f);
+        let wa = Rect::new(0.0, 0.0, 3072.0, 1920.0);
+        let r = sidebar_dock_rect(2.0, &f, &wa);
         assert_eq!(r.x, 0.0);
         assert_eq!(r.w, 168.0); // 96*1.5 + 6*2*2
         assert_eq!(r.h, 472.0); // 424 + 48
@@ -1347,7 +1459,8 @@ mod tests {
     fn sidebar_dock_rect_clamps_full_height_for_many_icons() {
         let mut f = test_fence(FenceLayout::Sidebar);
         f.icon_ids = (0..29).map(|i| format!("icon{i}")).collect();
-        let r = sidebar_dock_rect(1920.0, 1920.0, 2.0, &f);
+        let wa = Rect::new(0.0, 0.0, 1920.0, 1920.0);
+        let r = sidebar_dock_rect(2.0, &f, &wa);
         assert_eq!(r.h, 1920.0);
         assert_eq!(r.y, 0.0);
         assert!(r.x + r.w <= 1920.0);
@@ -1358,7 +1471,8 @@ mod tests {
     fn sidebar_dock_rect_right_anchors_to_right_edge() {
         let mut f = test_fence(FenceLayout::Sidebar);
         f.appearance.sidebar_pos = SidebarPosition::Right;
-        let r = sidebar_dock_rect(3072.0, 1920.0, 2.0, &f);
+        let wa = Rect::new(0.0, 0.0, 3072.0, 1920.0);
+        let r = sidebar_dock_rect(2.0, &f, &wa);
         assert_eq!(r.x, 3072.0 - r.w);
         assert!(r.x >= 0.0);
     }
@@ -1368,7 +1482,8 @@ mod tests {
     fn sidebar_dock_rect_top_makes_horizontal_dock() {
         let mut f = test_fence(FenceLayout::Sidebar);
         f.appearance.sidebar_pos = SidebarPosition::Top;
-        let r = sidebar_dock_rect(3072.0, 1920.0, 2.0, &f);
+        let wa = Rect::new(0.0, 0.0, 3072.0, 1920.0);
+        let r = sidebar_dock_rect(2.0, &f, &wa);
         assert_eq!(r.h, 168.0); // 96*1.5 + 6*2*2
         assert_eq!(r.y, 0.0);
         assert_eq!(r.w, 472.0); // 424 + 48
@@ -1381,7 +1496,8 @@ mod tests {
     fn sidebar_dock_rect_empty_fence_keeps_min_size() {
         let mut f = test_fence(FenceLayout::Sidebar);
         f.icon_ids.clear();
-        let r = sidebar_dock_rect(1920.0, 1920.0, 2.0, &f);
+        let wa = Rect::new(0.0, 0.0, 1920.0, 1920.0);
+        let r = sidebar_dock_rect(2.0, &f, &wa);
         assert_eq!(r.h, 200.0); // clamp 下限 100*scale
         assert_eq!(r.w, 168.0); // 96*1.5 + 6*2*2
     }

@@ -24,11 +24,12 @@
 //! 反复建/缩表面）。
 //!
 //! ## 坐标映射
-//! `content` 视觉偏移到内容原点，绘制时渲染目标施加平移变换，绘制仍用虚拟屏幕
-//! 坐标——`surface_rect` 记录了表面覆盖的虚拟屏幕区域，虚拟 (x,y) 在表面内的
-//! 位置是 (x - surface_rect.x, y - surface_rect.y)。模糊视觉的**偏移** = 栅栏窗口
-//! 坐标（fence - origin）；其**裁剪几何**在视觉本地坐标空间（偏移恒 (0,0)，铺满
-//! 整个视觉），圆角与栅栏一致。
+//! overlay 窗口客户端 (0,0) = 虚拟屏 (0,0)（`OverlayWindow::create` 保证），因此
+//! 虚拟屏幕坐标就是窗口坐标。`content` 视觉偏移到内容原点，绘制时渲染目标施加
+//! 平移变换，绘制仍用虚拟屏幕坐标——`surface_rect` 记录了表面覆盖的虚拟屏幕区域，
+//! 虚拟 (x,y) 在表面内的位置是 (x - surface_rect.x, y - surface_rect.y)。模糊视觉
+//! 的**偏移** = 栅栏窗口坐标（即栅栏虚拟坐标）；其**裁剪几何**在视觉本地坐标空间
+//! （偏移恒 (0,0)，铺满整个视觉），圆角与栅栏一致。
 
 use windows::core::{Interface, Result, HSTRING};
 use windows::Graphics::Effects::IGraphicsEffect;
@@ -42,6 +43,8 @@ use windows::UI::Composition::{
 use windows_numerics::{Matrix3x2, Vector2, Vector3};
 
 use sylva_shell::icons::IconData;
+
+use sylva_core::model::FenceLayout;
 
 use crate::device::RenderDevice;
 use crate::draw::{draw_scene, IconStore, TextFormats};
@@ -79,8 +82,6 @@ pub struct Compositor {
     surface: CompositionSurface,
     /// 当前表面覆盖的虚拟屏幕区域（原点 + 尺寸）。
     surface_rect: RectF,
-    /// overlay 窗口的虚拟屏幕原点：窗口 (0,0) 即虚拟 (origin.0, origin.1)。
-    origin: (f32, f32),
     // 持有以维持 target 存活（SetRoot 后合成器亦引用它；字段只作生命周期锚点，不读）
     #[allow(dead_code)]
     target: DesktopWindowTarget,
@@ -101,17 +102,9 @@ pub struct Compositor {
 impl Compositor {
     /// 绑定到 overlay 窗口。内容表面先以占位尺寸创建，首次 `present` 按内容包围盒重建。
     ///
-    /// `ox/oy` 是 overlay 窗口的虚拟屏幕原点；`width/height` 为虚拟屏幕尺寸。
-    pub fn new(
-        device: RenderDevice,
-        hwnd: HWND,
-        ox: f32,
-        oy: f32,
-        width: u32,
-        height: u32,
-        theme: Theme,
-    ) -> Result<Self> {
-        let _ = (width, height);
+    /// 坐标约定：overlay 窗口客户端 (0,0) = 虚拟屏 (0,0)（见 `OverlayWindow::create`），
+    /// 场景里的虚拟屏幕坐标可直接作为窗口坐标使用，无任何换算。
+    pub fn new(device: RenderDevice, hwnd: HWND, theme: Theme) -> Result<Self> {
         // 桌面窗口目标（绑定 overlay 窗口）。非置顶：窗口在桌面壳层 z 序中由系统管理，
         // 全屏独占应用运行时 DWM 自动隐藏置顶窗口（wallpaper-engine 同款暂停逻辑）。
         let interop: ICompositorDesktopInterop = device.compositor.cast()?;
@@ -152,12 +145,11 @@ impl Compositor {
             device,
             surface,
             surface_rect: RectF {
-                x: ox,
-                y: oy,
+                x: 0.0,
+                y: 0.0,
                 w: 1.0,
                 h: 1.0,
             },
-            origin: (ox, oy),
             target,
             root,
             content,
@@ -177,7 +169,14 @@ impl Compositor {
     /// 一致（App 层预分配），同一 ID 重复上传会覆盖旧位图。
     pub fn present(&mut self, scene: &Scene, uploads: &[(u64, &IconData)]) -> Result<()> {
         if let Some(bbox) = scene.content_rect() {
-            self.ensure_covering(bbox);
+            // 侧边栏 Dock 的悬停工具提示会随光标频繁出现/消失，使内容包围盒在
+            // 「仅 Dock」与「Dock+工具提示」间切换。若表面随之反复收缩/重建，
+            // 重建瞬间新表面未就绪会闪一帧——桌面上只有 Dock 一个栅栏时没有别的
+            // 内容撑住表面，肉眼即见快速闪烁（打开控制中心就不闪，正是因为面板
+            // 让表面变大、工具提示变化不再越界）。这里探测到 Dock 存在就禁止收缩：
+            // 表面第一次覆盖到工具提示范围后保持不再缩小，之后工具提示增删不再触发重建。
+            let has_dock = scene.fences.iter().any(|f| f.layout == FenceLayout::Sidebar);
+            self.ensure_covering(bbox, has_dock);
         }
         let frame = self.surface.begin_frame()?;
         tracing::debug!("present: begin_frame 成功");
@@ -209,7 +208,12 @@ impl Compositor {
     /// - 其余情况沿用现有表面（迟滞：拖动/悬停时表面稳定不抖动）。
     ///
     /// 重建时图标位图无需重新上传——它们是设备级资源，跨表面仍有效。
-    fn ensure_covering(&mut self, bbox: RectF) {
+    ///
+    /// `keep_large`：禁止收缩（侧边栏 Dock 存在时）。Dock 的工具提示随光标频繁
+    /// 增删，若允许收缩，表面会在「Dock 小」与「Dock+工具提示大」间反复重建，
+    /// 重建瞬间新表面未就绪闪一帧 → 只有侧边栏时肉眼可见的快速闪烁。禁止收缩后
+    /// 表面只增不减，工具提示增删不再触发表面重建（见 `present` 的调用说明）。
+    fn ensure_covering(&mut self, bbox: RectF, keep_large: bool) {
         let want = RectF {
             x: bbox.x - SURFACE_PAD,
             y: bbox.y - SURFACE_PAD,
@@ -221,7 +225,7 @@ impl Compositor {
             && cur.y <= want.y
             && cur.x + cur.w >= want.x + want.w
             && cur.y + cur.h >= want.y + want.h;
-        let oversized = (cur.w * cur.h) > SHRINK_FACTOR * (want.w * want.h);
+        let oversized = !keep_large && (cur.w * cur.h) > SHRINK_FACTOR * (want.w * want.h);
         if covers && !oversized {
             return;
         }
@@ -256,10 +260,11 @@ impl Compositor {
             X: sw as f32,
             Y: sh as f32,
         });
-        // 表面原点（虚拟屏幕坐标）→ 窗口坐标偏移（窗口 (0,0) 即虚拟 origin）
+        // 表面原点（虚拟屏幕坐标）→ 窗口坐标偏移：窗口客户端 (0,0) = 虚拟 (0,0)
+        //（`OverlayWindow::create` 保证），虚拟坐标即窗口坐标，直接使用。
         let _ = self.content.SetOffset(Vector3 {
-            X: want.x - self.origin.0,
-            Y: want.y - self.origin.1,
+            X: want.x,
+            Y: want.y,
             Z: 0.0,
         });
         self.surface = surface;
@@ -311,8 +316,9 @@ impl Compositor {
             }
         }
         let brush = self.blur_brush.as_ref().expect("上面刚赋值");
-        let x = f.x - self.origin.0;
-        let y = f.y - self.origin.1;
+        // 窗口客户端 (0,0) = 虚拟 (0,0)：栅栏虚拟坐标直接作为窗口坐标（见 create）。
+        let x = f.x;
+        let y = f.y;
         let (w, h) = (f.width, f.height);
         let corner = self.theme.fence_corner_radius;
         match &mut self.blurs[i] {

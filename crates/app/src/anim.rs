@@ -185,13 +185,6 @@ pub(crate) fn fence_visual_rect(rt: &Runtime, fence: usize) -> Rect {
     }
 }
 
-/// 记录/替换栅栏补间（同一栅栏重复拖动时从当前视觉位置接续，不跳变）并启动动画定时器。
-pub(crate) fn set_fence_tween(rt: &mut Runtime, tween: FenceTween) {
-    rt.fence_tweens.retain(|t| t.fence != tween.fence);
-    rt.fence_tweens.push(tween);
-    arm_anim_timer(rt);
-}
-
 /// 图标悬停当前缩放（1.0 = 常态，1.3 = 完全放大，约 1.3 倍原图标大小）。
 pub(crate) fn icon_hover_scale(rt: &Runtime, fence: usize, icon: usize, now: Instant) -> f32 {
     match rt.icon_hover {

@@ -39,11 +39,14 @@ pub(crate) use windows::Win32::System::Console::SetConsoleCtrlHandler;
 pub(crate) use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
+pub(crate) use windows::Win32::System::Ole::OleInitialize;
 pub(crate) use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 pub(crate) use windows::Win32::System::Threading::CreateMutexW;
-pub(crate) use windows::Win32::UI::HiDpi::GetDpiForSystem;
+pub(crate) use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
+};
 pub(crate) use windows::Win32::UI::Input::Ime::{
     ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow, CFS_POINT, COMPOSITIONFORM,
 };
@@ -55,9 +58,11 @@ pub(crate) use windows::Win32::UI::Shell::{
     FOS_ALLOWMULTISELECT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, HDROP, SIGDN_FILESYSPATH,
 };
 pub(crate) use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetProcessDPIAware,
-    SystemParametersInfoW, TrackPopupMenu, HMENU, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_NONOTIFY, TPM_RETURNCMD,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetSystemMetrics, PostMessageW,
+    SetProcessDPIAware, SystemParametersInfoW, TrackPopupMenu, HMENU,
+    MF_SEPARATOR, MF_STRING, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, TPM_NONOTIFY,
+    TPM_RETURNCMD,
 };
 
 pub(crate) use sylva_core::config::ConfigStore;
@@ -69,8 +74,8 @@ pub(crate) use sylva_core::model::{
 pub(crate) use sylva_render::{
     run_message_loop, Compositor, ConsoleHit, ConsoleZone, FenceHit, HitModel, IconHit,
     ListColumns, OverlayEvent, OverlayWindow, RectF, RenderDevice, ResizeZone, Scene, SceneConsole,
-    SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, Theme, GRIP_SIZE,
-    WM_APP_QUIT, WM_SYLVA_INJECT,
+    SceneEdit, SceneFence, SceneFenceDetail, SceneFenceRow, SceneIcon, Theme, GRID_CAPTION_H_MULT,
+    GRIP_SIZE, WM_APP_QUIT, WM_SYLVA_INJECT,
 };
 pub(crate) use sylva_shell::icons::IconData;
 pub(crate) use sylva_shell::items::DesktopItem;
@@ -81,9 +86,6 @@ use crate::context_menu::*;
 use crate::editing::*;
 use crate::file_ops::*;
 use crate::scene::*;
-
-/// 应用数据目录名（位于 %APPDATA% 下）。
-pub(crate) const APP_DIR: &str = "Sylva";
 
 /// 栅栏最小宽度（缩放下限，物理像素）。
 pub(crate) const MIN_FENCE_W: f32 = 200.0;
@@ -177,6 +179,10 @@ pub(crate) struct Runtime {
     pub(crate) theme: Theme,
     pub(crate) vw: f32,
     pub(crate) vh: f32,
+    /// overlay 窗口在屏幕上的位置 = 虚拟屏原点（客户端 (0,0) = 虚拟 (0,0)）。
+    /// 多屏时副屏在左/上可为负；主显示器工作区（`SPI_GETWORKAREA` 为屏幕坐标）
+    /// 转虚拟坐标需减去它。显示拓扑变化时随 `DisplayChange` 更新。
+    pub(crate) origin: (f32, f32),
     pub(crate) store: ConfigStore,
     /// 当前悬停的图标（栅栏下标, 图标下标）；None = 无悬停。
     pub(crate) hover: Option<(usize, usize)>,
@@ -202,6 +208,9 @@ pub(crate) struct Runtime {
     pub(crate) console_hover: Option<ConsoleZone>,
     /// 栅栏管理页列表滚动偏移（物理像素）。
     pub(crate) fence_scroll: f32,
+    /// 各栅栏最近一次实际渲染高度（物理像素，`build_scene` 每帧回写）。
+    /// 自动高度栅栏 `bounds.h == 0`，碰撞检测/夹屏需要真实高度入算；下标与 `fences` 对齐。
+    pub(crate) last_layout_h: Vec<f32>,
     /// 栅栏拖动/缩放补间（多个栅栏可同时动；结束自动移除）。
     pub(crate) fence_tweens: Vec<FenceTween>,
     /// 图标悬停放大补间（一次只有一个悬停图标）。
@@ -218,6 +227,12 @@ pub(crate) struct Runtime {
     pub(crate) last_activity: std::time::Instant,
     /// 最近一次工作集修剪时间（限频：空闲时最多每 60s 一次）。
     pub(crate) last_trim: std::time::Instant,
+    /// 侧边栏图标拖动排序状态：Some((fence_idx, icon_idx, cursor_x, cursor_y))。
+    pub(crate) sidebar_reorder: Option<(usize, usize, f32, f32)>,
+    /// 拖动排序时的图标顺序（fence_idx → Vec<usize>），由 build_scene 每帧计算。
+    pub(crate) reorder_slot_order: std::collections::HashMap<usize, Vec<usize>>,
+    /// 当前帧各图标渲染位置（fence_idx → Vec<(x, y)>），每帧更新，用于 lerp 动画。
+    pub(crate) current_icon_positions: std::collections::HashMap<usize, Vec<(f32, f32)>>,
 }
 
 // 事件处理器再入守卫：`handle_event` 打开模态菜单/属性页（`TrackPopupMenu`、Shell 动词
@@ -256,17 +271,49 @@ fn main() {
         return;
     }
 
-    // 全部使用物理像素，必须声明进程 DPI 感知
+    // 全部使用物理像素，必须声明进程 DPI 感知。
+    // 首选 Per-Monitor v2：窗口按真实物理像素渲染，DWM 不再对整窗位图缩放
+    // （消除高缩放下「整窗发糊 + 拖拽/动画重采样与合成竞争 → 闪烁」），
+    // 并支持 WM_DPICHANGED 实时重排。旧系统不支持时回退系统感知。
     unsafe {
-        let _ = SetProcessDPIAware();
+        let pmv2 = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        if pmv2.is_err() {
+            // Win8.1/部分环境不支持 PerMonitorV2：降级为系统感知（GetDpiForSystem 仍可用）。
+            let _ = SetProcessDPIAware();
+        }
     }
     // COM：图标枚举/提取需要（APARTMENTTHREADED）
     let _com = sylva_shell::com::init();
+    // OLE 剪贴板：Shell 右键菜单的复制/剪切/粘贴依赖 OleInitialize
+    // （IContextMenu::InvokeCommand 内部调用 OleSetClipboard，未初始化 OLE 时静默失败）
+    let _ole = unsafe { OleInitialize(None) };
 
-    let appdata = std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let data_dir = appdata.join(APP_DIR);
+    // 数据目录：exe 同级的 data 文件夹（与安装器约定一致——安装器在 <安装目录>/data 创建
+    // 空目录，卸载时随安装目录一并删除；不再用 %APPDATA%，否则卸载不保留数据也清不掉）。
+    let data_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("data");
+    // 从旧位置（%APPDATA%\Sylva）迁移：旧版数据不在 exe 同级时搬过来，一次完成。
+    if !data_dir.join("desk.json").exists() {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let old_dir = PathBuf::from(appdata).join("Sylva");
+            if old_dir.join("desk.json").exists() {
+                let _ = std::fs::create_dir_all(&data_dir);
+                // 逐文件迁移（跨卷 rename 会失败，fallback 到 copy）
+                for entry in std::fs::read_dir(&old_dir).into_iter().flatten().flatten() {
+                    let src = entry.path();
+                    let dst = data_dir.join(entry.file_name());
+                    if std::fs::rename(&src, &dst).is_err() {
+                        let _ = std::fs::copy(&src, &dst);
+                        let _ = std::fs::remove_file(&src);
+                    }
+                }
+                tracing::info!("已从 {} 迁移数据到 {}", old_dir.display(), data_dir.display());
+            }
+        }
+    }
 
     let _guard = match logging::init(&data_dir.join("logs")) {
         Ok(g) => g,
@@ -315,24 +362,12 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
     // 注意：所有 DIP 度量必须**一起**缩放（字号、图标、间距、内边距、列宽、控制台），
     // 只放大文字不放大行距/间距正是「行列间重叠」的根因。
     let mut theme = Theme::default();
-    let dpi_scale = unsafe { GetDpiForSystem() } as f32 / 96.0;
-    theme.scale = dpi_scale;
-    theme.title.size *= dpi_scale;
-    theme.label.size *= dpi_scale;
-    theme.icon_size *= dpi_scale;
-    theme.icon_gap *= dpi_scale;
-    theme.icon_caption_gap *= dpi_scale;
-    theme.fence_padding *= dpi_scale;
-    theme.fence_corner_radius *= dpi_scale;
-    theme.title_padding_bottom *= dpi_scale;
-    theme.caption_max_width *= dpi_scale;
-    theme.list_row_gap *= dpi_scale;
-    theme.list_label_gap *= dpi_scale;
-    tracing::info!(
-        dpi = unsafe { GetDpiForSystem() },
-        scale = dpi_scale,
-        "主题按 DPI 缩放"
-    );
+    // Per-Monitor v2 下用 overlay 所在显示器的 DPI（系统感知回退则同 GetDpiForSystem）。
+    // overlay 已在上一步创建，hwnd 可用。
+    let dpi = unsafe { GetDpiForWindow(overlay.hwnd) };
+    let dpi_scale = dpi as f32 / 96.0;
+    apply_theme_scale(&mut theme, dpi_scale);
+    tracing::info!(dpi, scale = dpi_scale, "主题按 DPI 缩放");
     // 侧边栏栅栏启动归一化：旧数据可能存了超屏/离屏 bounds（图标多时曾按内容全高
     // 计算导致 top 为负），重新停靠到屏幕内。折叠按钮已移除，历史折叠状态强制展开。
     let mut dock_reanchor = 0;
@@ -342,13 +377,10 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
                 f.sidebar_collapsed = false;
                 dock_reanchor += 1;
             }
-            let b = sidebar_dock_rect(vw as f32, vh as f32, theme.scale, f);
+            let wa = work_area_rect(overlay.x as f32, overlay.y as f32, vw as f32, vh as f32);
+            let b = sidebar_dock_rect(theme.scale, f, &wa);
             // 夹在工作区内（任务栏扣除后），下沿不越过任务栏
-            let b = clamp_sidebar_work_rect(
-                b,
-                work_area_rect(vw as f32, vh as f32),
-                f.appearance.sidebar_pos,
-            );
+            let b = clamp_sidebar_work_rect(b, wa, f.appearance.sidebar_pos);
             if f.bounds != b {
                 f.bounds = b;
                 dock_reanchor += 1;
@@ -359,16 +391,8 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         tracing::info!(dock_reanchor, "侧边栏栅栏边界已重新停靠到屏幕内");
         let _ = store.save(&desk);
     }
-    let compositor = Compositor::new(
-        device,
-        overlay.hwnd,
-        overlay.x as f32,
-        overlay.y as f32,
-        vw,
-        vh,
-        theme.clone(),
-    )
-    .map_err(|e| sylva_core::CoreError::Render(e.to_string()))?;
+    let compositor = Compositor::new(device, overlay.hwnd, theme.clone())
+        .map_err(|e| sylva_core::CoreError::Render(e.to_string()))?;
 
     // 3) 枚举真实桌面图标（IShellFolder 枚举，不依赖 DefView）
     let mut items = sylva_shell::items::enumerate_desktop_items()
@@ -444,6 +468,8 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
     if desk.desktop_mode {
         hierarchy.restore_icons();
     }
+    // 真实高度缓冲：与栅栏一一对应，`build_scene` 每帧回写（移动 desk 前取长度）。
+    let last_layout_h = vec![0.0; desk.fences.len()];
     let mut rt = Runtime {
         desk,
         items,
@@ -453,6 +479,7 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         theme: theme.clone(),
         vw: vw as f32,
         vh: vh as f32,
+        origin: (overlay.x as f32, overlay.y as f32),
         store,
         hover: None,
         cursor: None,
@@ -466,6 +493,7 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         selected_fence: 0,
         console_hover: None,
         fence_scroll: 0.0,
+        last_layout_h,
         fence_tweens: Vec::new(),
         icon_hover: None,
         hierarchy,
@@ -474,15 +502,28 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
         pending_uploads: Vec::new(),
         last_activity: std::time::Instant::now(),
         last_trim: std::time::Instant::now(),
+        sidebar_reorder: None,
+        reorder_slot_order: std::collections::HashMap::new(),
+        current_icon_positions: std::collections::HashMap::new(),
     };
     // 双向同步：启动时清一次——内部库被外部删除的文件、链接文件夹与栅栏的差集，
     // 都同步进栅栏（链接文件夹的预置文件启动即出现）。
     if reconcile_fences(&mut rt) {
+        // 链接文件夹同步后图标数变了，侧边栏 bounds 需要重新计算（reanchor 时是空的）
+        reanchor_fences(&mut rt);
         let _ = rt.store.save(&rt.desk);
     }
     // 高度策略：`bounds.h == 0` 表示未手动缩放，按内容自适应（增删应用自动长高）。
     // 不在此冻结高度——用户拖边缘/角缩放后才落为具体值。
-    let scene = build_scene(&mut rt, Instant::now());
+    let mut scene = build_scene(&mut rt, Instant::now());
+    // 启动重叠消解：真实高度已由上面首帧 layout 写入 `last_layout_h`（自动高度栅栏
+    // 的 0 高此时可换算成真实可见高度）。历史布局若存在重叠（朋友机「两个栅栏突然
+    // 重叠」即由此而来）→ 推离并持久化，随后重排一帧供首帧呈现使用。
+    if resolve_overlaps(&mut rt) {
+        tracing::info!("启动重叠消解：存在重叠栅栏，已推离并保存");
+        let _ = rt.store.save(&rt.desk);
+        scene = build_scene(&mut rt, Instant::now());
+    }
     // 首帧上传：图标位图（新增项的位图在 build_scene 内推入 pending_uploads）
     let mut upload_refs: Vec<(u64, &sylva_shell::icons::IconData)> =
         uploads.iter().map(|(id, d)| (*id, d)).collect();
@@ -520,7 +561,7 @@ fn run(data_dir: &std::path::Path) -> sylva_core::Result<()> {
             return None;
         }
         let _reentry = ReentryGuard;
-        Some(handle_event(&mut runtime2.borrow_mut(), ev))
+        handle_event(&mut runtime2.borrow_mut(), ev)
     }));
     overlay.set_model(model);
 
@@ -571,15 +612,41 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> BOOL {
     BOOL(1) // 已处理，阻止默认终止行为（让主循环干净退出）
 }
 
-/// 除 `skip` 外其它栅栏的当前边界（碰撞/吸附的锚点集合）。
+/// 栅栏用于碰撞/夹屏的真实矩形：自动高度（`bounds.h <= 0`）时用最近一次布局
+/// 渲染高度。视觉矩形 = 模型矩形（拖拽已无补间），碰撞检测与实际可见区域一致。
+fn fence_collision_rect(rt: &Runtime, i: usize) -> Rect {
+    let f = &rt.desk.fences[i];
+    Rect::new(f.bounds.x, f.bounds.y, f.bounds.w, fence_height(rt, i))
+}
+
+/// 除 `skip` 外其它栅栏的碰撞矩形（真实高度入算——自动高度栅栏不再以 0 高漏检，
+/// 两个栅栏叠加到同一个自动高度栅栏上就是旧版「栅栏重叠」的根因之一）。
 fn other_bounds(rt: &Runtime, skip: usize) -> Vec<Rect> {
-    rt.desk
-        .fences
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != skip)
-        .map(|(_, f)| f.bounds)
+    (0..rt.desk.fences.len())
+        .filter(|&i| i != skip)
+        .map(|i| fence_collision_rect(rt, i))
         .collect()
+}
+
+/// 启动重叠消解：加载的布局可能因历史 bug / DPI 变化存在重叠（尤其自动高度栅栏，
+/// 旧版碰撞检测把 0 高当真高）。按序把每个栅栏与其它栅栏推离（真实高度入算），
+/// 保证互不重叠且都在屏幕内。返回是否有变化（有变化才持久化 + 重排一帧）。
+/// 依赖 `last_layout_h` 已由首帧 `build_scene` 填充，故须在首帧布局之后调用。
+fn resolve_overlaps(rt: &mut Runtime) -> bool {
+    let mut changed = false;
+    let screen = screen_rect(rt);
+    for i in 0..rt.desk.fences.len() {
+        let others = other_bounds(rt, i);
+        let cur = fence_collision_rect(rt, i);
+        let out = settle_move(&cur, &others, &screen, FENCE_GAP);
+        // 只修位置（不改变用户已设的尺寸），并圆整到整数物理像素。
+        if (out.x - cur.x).abs() > 0.5 || (out.y - cur.y).abs() > 0.5 {
+            rt.desk.fences[i].bounds.x = out.x.round();
+            rt.desk.fences[i].bounds.y = out.y.round();
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// 虚拟屏幕边界（物理像素；栅栏活动范围）。
@@ -587,9 +654,12 @@ fn screen_rect(rt: &Runtime) -> Rect {
     Rect::new(0.0, 0.0, rt.vw, rt.vh)
 }
 
-/// 主显示器工作区（任务栏扣除后；物理像素，与虚拟屏幕坐标一致）。
-/// 进程已 `SetProcessDPIAware`，`SPI_GETWORKAREA` 返回物理像素。失败回退整个虚拟屏幕。
-fn work_area_rect(vw: f32, vh: f32) -> Rect {
+/// 主显示器工作区（任务栏扣除后；物理像素）。
+/// `SPI_GETWORKAREA` 返回的是**屏幕坐标**（主显示器左上 = (0,0)），而栅栏布局用
+/// 虚拟/客户端坐标（客户端 (0,0) = 虚拟屏 (0,0) = 屏幕 (ox, oy)）——转虚拟坐标
+/// 需减去 `(ox, oy)`。单屏时 (0,0) 减了无感；多屏主屏非虚拟原点时少了这一步
+/// 侧边栏夹屏会整体错位。失败回退整个虚拟屏幕。
+fn work_area_rect(ox: f32, oy: f32, vw: f32, vh: f32) -> Rect {
     let mut rc = RECT::default();
     let ok = unsafe {
         SystemParametersInfoW(
@@ -603,8 +673,8 @@ fn work_area_rect(vw: f32, vh: f32) -> Rect {
         return Rect::new(0.0, 0.0, vw, vh);
     }
     Rect::new(
-        rc.left as f32,
-        rc.top as f32,
+        rc.left as f32 - ox,
+        rc.top as f32 - oy,
         (rc.right - rc.left) as f32,
         (rc.bottom - rc.top) as f32,
     )
@@ -633,8 +703,13 @@ fn is_popup_dismiss_event(ev: &OverlayEvent) -> bool {
     )
 }
 
-/// 处理一个用户交互事件：更新布局 → 重绘 → 生成新命中模型。
-fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
+/// 处理一个用户交互事件：更新布局 → （按需）重绘 → 生成新命中模型。
+///
+/// 返回 `None` 表示本事件不改变任何可见状态，无需重绘（overlay 保持当前
+/// 命中模型与窗口区域）。这是空闲 CPU/GPU 与桌面闪烁的关键门控：
+/// 无侧边栏时鼠标扫过（`CursorMove`）与 4s 心跳（`SyncLibrary` 无变化）
+/// 都不再触发全量重绘。
+fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> Option<HitModel> {
     // 空闲修剪门控：除周期性的 `SyncLibrary` 外都算用户活动，刷新时间戳。
     // `SyncLibrary` 每 4s 触发一次，若算活动则永远「不空闲」，修剪永不执行。
     if !matches!(ev, OverlayEvent::SyncLibrary) {
@@ -648,52 +723,40 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
     if rt.edit.is_some() && is_popup_dismiss_event(&ev) {
         dismiss_edit(rt);
     }
+    // 重绘门控：默认 true（一切改变可见状态的事件照常重绘），
+    // 仅对「可能无事可画」的事件显式置 false。
+    let mut redraw = true;
     match ev {
         OverlayEvent::FenceMove { fence, pos } => {
-            // 拖动标题栏：不交叉（无重叠推挤）+ 磁吸吸附 + 限制在虚拟屏幕内
+            // 拖动标题栏：不交叉（无重叠推挤）+ 磁吸吸附 + 限制在虚拟屏幕内。
+            // 直接落到目标（无补间）：视觉 = 模型 = 鼠标位置，拖拽即时跟手；
+            // 且鼠标坐标是整数，拖拽中不存在分数坐标导致的边框发虚。
             let (x, y) = pos;
-            let from = fence_visual_rect(rt, fence);
             let cur = rt.desk.fences.get(fence).map(|f| (f.bounds.w, f.bounds.h));
             if let Some((w, h)) = cur {
                 let others = other_bounds(rt, fence);
-                let screen = screen_rect(rt);
+                let wa = work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh);
                 let cand = Rect::new(x, y, w, h);
-                let mut out = settle_move(&cand, &others, &screen, FENCE_GAP);
+                let mut out = settle_move(&cand, &others, &wa, FENCE_GAP);
                 // 侧边栏 dock 夹在工作区内（任务栏扣除后），下沿不越过任务栏
                 if let Some(f) = rt.desk.fences.get(fence) {
                     if f.appearance.layout == FenceLayout::Sidebar {
-                        out = clamp_sidebar_work_rect(
-                            out,
-                            work_area_rect(rt.vw, rt.vh),
-                            f.appearance.sidebar_pos,
-                        );
+                        out = clamp_sidebar_work_rect(out, wa, f.appearance.sidebar_pos);
                     }
                 }
                 if let Some(f) = rt.desk.fences.get_mut(fence) {
                     f.bounds.x = out.x;
                     f.bounds.y = out.y;
                 }
-                // 丝滑跟随：模型落到目标，视觉矩形从当前位置追过去
-                let to = Rect::new(out.x, out.y, w, h);
-                set_fence_tween(
-                    rt,
-                    FenceTween {
-                        fence,
-                        from,
-                        to,
-                        t0: Instant::now(),
-                        dur: 0.12,
-                    },
-                );
             }
         }
         OverlayEvent::FenceResize { fence, zone, rect } => {
             // 拖边缘/角标：只动可动边，被其它栅栏挡住时停在交界边（不侵入），
             // 边接近时吸附对齐；锚定边不动，最小尺寸/屏幕边界约束在算法内完成。
+            // 直接落到目标（无补间），视觉 = 模型 = 鼠标，即时跟手。
             let (nx, ny, nw, nh) = rect;
-            let from = fence_visual_rect(rt, fence);
             let others = other_bounds(rt, fence);
-            let screen = screen_rect(rt);
+            let wa = work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh);
             let free = match zone {
                 ResizeZone::Right => FreeSides::Right,
                 ResizeZone::Bottom => FreeSides::Bottom,
@@ -706,7 +769,7 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
             let mut out = settle_resize(
                 &cand,
                 &others,
-                &screen,
+                &wa,
                 free,
                 MIN_FENCE_W,
                 MIN_FENCE_H,
@@ -716,7 +779,7 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
             // 横向锁 y/h，只保留用户拖动的那一轴，宽度/高度弹回锁定值，放大图标不再被裁。
             if let Some(f) = rt.desk.fences.get(fence) {
                 if f.appearance.layout == FenceLayout::Sidebar {
-                    let d = sidebar_dock_rect(rt.vw, rt.vh, rt.theme.scale, f);
+                    let d = sidebar_dock_rect(rt.theme.scale, f, &wa);
                     out = if f.appearance.sidebar_pos == SidebarPosition::Top {
                         Rect::new(out.x, d.y, out.w, d.h)
                     } else {
@@ -725,7 +788,7 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                     // 夹在工作区内（任务栏扣除后）：纵向 dock 下沿不越过任务栏
                     out = clamp_sidebar_work_rect(
                         out,
-                        work_area_rect(rt.vw, rt.vh),
+                        work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh),
                         f.appearance.sidebar_pos,
                     );
                 }
@@ -733,16 +796,6 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
             if let Some(f) = rt.desk.fences.get_mut(fence) {
                 f.bounds = out;
             }
-            set_fence_tween(
-                rt,
-                FenceTween {
-                    fence,
-                    from,
-                    to: out,
-                    t0: Instant::now(),
-                    dur: 0.12,
-                },
-            );
         }
         OverlayEvent::IconDoubleClicked { fence, icon } => {
             // 双击栅栏内图标：若属于多选集合则全部打开，否则打开双击项（资源管理器行为）
@@ -790,12 +843,16 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
             rt.select_band = None;
         }
         OverlayEvent::CursorMove { x, y } => {
-            // 侧边栏 Dock 放大的连续光标驱动（build_scene 据此每帧算缩放）
+            // 侧边栏 Dock 放大的连续光标驱动（build_scene 据此每帧算缩放）。
+            // 仅当存在 Dock 栅栏时光标才影响画面 → 无 Dock 时不重绘，
+            // 桌面任意鼠标移动都不再触发全量重绘（闪烁根治）。
             rt.cursor = Some((x, y));
+            redraw = has_sidebar_dock(rt);
         }
         OverlayEvent::CursorLeave => {
-            // 光标离开窗口：清除 Dock 放大（下一帧全部恢复 1.0）
+            // 光标离开窗口：清除 Dock 放大（下一帧全部恢复 1.0）。
             rt.cursor = None;
+            redraw = has_sidebar_dock(rt);
         }
         OverlayEvent::HoverEnter { fence, icon } => {
             rt.hover = Some((fence, icon));
@@ -900,13 +957,10 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                         f.sidebar_collapsed = false;
                         // 停靠到屏幕边缘（侧 = 当前设置的停靠位置），并夹到屏幕内，
                         // 图标多时高度不超过屏幕（超出滚动），不会跑到屏幕外。
-                        let b = sidebar_dock_rect(rt.vw, rt.vh, rt.theme.scale, f);
+                        let wa = work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh);
+                        let b = sidebar_dock_rect(rt.theme.scale, f, &wa);
                         // 夹在工作区内（任务栏扣除后），下沿不越过任务栏
-                        f.bounds = clamp_sidebar_work_rect(
-                            b,
-                            work_area_rect(rt.vw, rt.vh),
-                            f.appearance.sidebar_pos,
-                        );
+                        f.bounds = clamp_sidebar_work_rect(b, wa, f.appearance.sidebar_pos);
                     }
                 } else if let Some(f) = rt.desk.fences.get_mut(i) {
                     f.appearance.layout = l;
@@ -948,43 +1002,56 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                     f.appearance.sidebar_pos = pos;
                     // 位置切换：重新停靠到新的一侧（否则只高亮、不移动）
                     if f.appearance.layout == FenceLayout::Sidebar {
-                        let b = sidebar_dock_rect(rt.vw, rt.vh, rt.theme.scale, f);
+                        let wa = work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh);
+                        let b = sidebar_dock_rect(rt.theme.scale, f, &wa);
                         // 夹在工作区内（任务栏扣除后），下沿不越过任务栏
-                        f.bounds = clamp_sidebar_work_rect(
-                            b,
-                            work_area_rect(rt.vw, rt.vh),
-                            f.appearance.sidebar_pos,
-                        );
+                        f.bounds = clamp_sidebar_work_rect(b, wa, f.appearance.sidebar_pos);
                     }
                 }
                 let _ = rt.store.save(&rt.desk);
             }
             ConsoleZone::AddFence => {
-                // 新建一个空白栅栏并选中（位置级联，避免叠在已有栅栏上）
-                let id = rt.desk.next_fence_id();
-                let s = rt.theme.scale;
-                let n = rt.desk.fences.len();
-                let x = 80.0 * s + (n as f32 % 6.0) * 40.0 * s;
-                let y = 120.0 * s + (n as f32 % 6.0) * 40.0 * s;
-                rt.desk.fences.push(Fence {
-                    id,
-                    title: Some(format!("栅栏 {}", id)),
-                    monitor_id: 0,
-                    bounds: Rect::new(x, y, 360.0 * s, 220.0 * s),
-                    state: FenceState::Expanded,
-                    icon_ids: Vec::new(),
-                    appearance: FenceAppearance::default(),
-                    scroll: 0.0,
-                    storage_path: None,
-                    sidebar_collapsed: false,
-                });
-                rt.selected_fence = rt.desk.fences.len() - 1;
-                if let Err(e) = rt.store.save(&rt.desk) {
-                    tracing::warn!("添加栅栏持久化失败: {e}");
+                // 新建栅栏：弹出文件夹选择器让用户选链接目录
+                if let Some(dir) = pick_folder(rt.hwnd) {
+                    // 用文件夹名作为栅栏标题
+                    let title = std::path::Path::new(&dir)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| format!("栅栏 {}", rt.desk.next_fence_id()));
+                    let id = rt.desk.next_fence_id();
+                    let s = rt.theme.scale;
+                    let w = 360.0 * s;
+                    let h = 220.0 * s;
+                    let start = Rect::new(80.0 * s, 120.0 * s, w, h);
+                    let others = (0..rt.desk.fences.len())
+                        .map(|j| fence_collision_rect(rt, j))
+                        .collect::<Vec<_>>();
+                    let screen = screen_rect(rt);
+                    let out = settle_move(&start, &others, &screen, FENCE_GAP);
+                    let bounds = Rect::new(out.x.round(), out.y.round(), w.round(), h.round());
+                    rt.desk.fences.push(Fence {
+                        id,
+                        title: Some(title),
+                        monitor_id: 0,
+                        bounds,
+                        state: FenceState::Expanded,
+                        icon_ids: Vec::new(),
+                        appearance: FenceAppearance::default(),
+                        scroll: 0.0,
+                        storage_path: Some(dir),
+                        sidebar_collapsed: false,
+                    });
+                    rt.selected_fence = rt.desk.fences.len() - 1;
+                    // 立即同步链接文件夹内容
+                    if reconcile_fences(rt) {
+                        tracing::info!("新栅栏已链接文件夹并同步内容");
+                    }
+                    let _ = rt.store.save(&rt.desk);
                 }
             }
             ConsoleZone::RemoveFence => {
-                // 移出当前选中的栅栏：成员退回未分组区，栅栏删除（与右键「删除栅栏」一致）
+                // 移出当前选中的栅栏：成员退回未分组区，栅栏删除。
+                // 不删除链接的文件夹（用户数据不受影响）。
                 let i = rt
                     .selected_fence
                     .min(rt.desk.fences.len().saturating_sub(1));
@@ -1138,7 +1205,8 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
         OverlayEvent::SyncLibrary => {
             // 双向同步：内部库被外部删除 → 栅栏项移除；链接文件夹增删改名 → 栅栏镜像
             // （文件夹是事实来源，栅栏即文件夹；有变化才持久化）
-            if reconcile_fences(rt) {
+            let changed = reconcile_fences(rt);
+            if changed {
                 let _ = rt.store.save(&rt.desk);
             }
             // 空闲修剪工作集：启动后用户长时间不操作时，把不再活跃的内存页换出 RAM，
@@ -1151,7 +1219,77 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
                 rt.last_trim = std::time::Instant::now();
                 memory::trim();
             }
+            // 无变化不重绘（消除 4s 心跳脉冲）
+            redraw = changed;
         }
+        OverlayEvent::DpiChanged { dpi } => {
+            // 所在显示器 DPI 变化（Per-Monitor v2）：重算主题缩放（覆盖旧的缩放
+            // 字段），并重排栅栏——侧边栏停靠尺寸随缩放变化，普通栅栏夹回屏内。
+            let scale = dpi as f32 / 96.0;
+            if (scale - rt.theme.scale).abs() < 1e-4 {
+                // DPI 实际未变（PerMonitorV2 下窗口跨显示器移动也可能触发）：
+                // 无需重画。
+                redraw = false;
+            } else {
+                let mut t = Theme::default();
+                apply_theme_scale(&mut t, scale);
+                rt.theme = t;
+                if reanchor_fences(rt) {
+                    let _ = rt.store.save(&rt.desk);
+                }
+                tracing::info!(dpi, scale, "DPI 变化：主题已重缩放并重排栅栏");
+            }
+        }
+        OverlayEvent::DisplayChange => {
+            // 显示拓扑/分辨率变化：重查虚拟屏，重设 overlay 窗口（移动 + 缩放），
+            // 再把超屏栅栏夹回屏内——修复「拔掉显示器/改分辨率后栅栏找不到」。
+            let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+            let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+            let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) } as u32;
+            let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) } as u32;
+            let changed = (vw as f32 - rt.vw).abs() > 0.5
+                || (vh as f32 - rt.vh).abs() > 0.5
+                || vx as f32 != rt.origin.0
+                || vy as f32 != rt.origin.1;
+            if changed {
+                unsafe { (*rt.overlay_ptr).resize(vx, vy, vw, vh) };
+                rt.vw = vw as f32;
+                rt.vh = vh as f32;
+                rt.origin = (vx as f32, vy as f32);
+                if reanchor_fences(rt) {
+                    let _ = rt.store.save(&rt.desk);
+                }
+                tracing::info!(vx, vy, vw, vh, "显示拓扑变化：overlay 已重设并夹回栅栏");
+            }
+        }
+        OverlayEvent::SidebarReorderDrag { fence, icon, mx, my } => {
+            // 侧边栏图标拖动中：记录拖动状态，触发重绘
+            // 排序计算在 build_scene 中基于实际图标位置完成
+            rt.sidebar_reorder = Some((fence, icon, mx, my));
+            redraw = true;
+        }
+        OverlayEvent::SidebarReorderEnd { fence, from, to } => {
+            // 侧边栏图标拖动结束：执行重排
+            rt.sidebar_reorder = None;
+            rt.reorder_slot_order.clear();
+            rt.current_icon_positions.clear();
+            if let Some(f) = rt.desk.fences.get_mut(fence) {
+                if from < f.icon_ids.len() && to <= f.icon_ids.len() && from != to {
+                    let id = f.icon_ids.remove(from);
+                    let insert_at = if to > from { to - 1 } else { to };
+                    f.icon_ids.insert(insert_at, id);
+                    let _ = rt.store.save(&rt.desk);
+                    tracing::info!(from, to, "侧边栏图标已重排");
+                }
+            }
+            redraw = true;
+        }
+    }
+
+    // 重绘门控落点：无可见变化的事件直接返回 None（overlay 保持当前命中模型
+    // 与区域），省掉一次 build_scene + D2D 全量绘制 + commit。
+    if !redraw {
+        return None;
     }
 
     // 重新排布 + 重绘 + 生成新命中模型（含区域）。
@@ -1163,7 +1301,87 @@ fn handle_event(rt: &mut Runtime, ev: OverlayEvent) -> HitModel {
     if let Err(e) = rt.compositor.present(&scene, &upload_refs) {
         tracing::warn!("重绘失败: {e}");
     }
-    hit_model_from(&rt.theme, &scene, &rt.desk)
+    Some(hit_model_from(&rt.theme, &scene, &rt.desk))
+}
+
+/// 是否存在侧边栏 Dock 栅栏（决定 `CursorMove` 是否需要驱动重绘）。
+fn has_sidebar_dock(rt: &Runtime) -> bool {
+    rt.desk
+        .fences
+        .iter()
+        .any(|f| f.appearance.layout == FenceLayout::Sidebar)
+}
+
+/// 把默认主题按 DPI 缩放系数放大（`scale = 系统DPI/96`）。
+/// 所有 DIP 度量必须一起缩放，只放文字不放行距/间距正是「行列重叠」的根因。
+/// `Theme::default()` 是未缩放基准；DPI 变化时用本函数重新应用，覆盖旧缩放。
+fn apply_theme_scale(theme: &mut Theme, scale: f32) {
+    theme.scale = scale;
+    theme.title.size *= scale;
+    theme.label.size *= scale;
+    theme.icon_size *= scale;
+    theme.icon_gap *= scale;
+    theme.icon_caption_gap *= scale;
+    theme.fence_padding *= scale;
+    theme.fence_corner_radius *= scale;
+    theme.title_padding_bottom *= scale;
+    theme.caption_max_width *= scale;
+    theme.list_row_gap *= scale;
+    theme.list_label_gap *= scale;
+}
+
+/// 栅栏当前实际高度（物理像素）：`bounds.h > 0` 为固定高度；否则（自动高度）用
+/// 最近一次布局渲染高度。碰撞检测与夹屏都必须按真实高度入算——自动高度栅栏
+/// `bounds.h == 0`，直接当 0 高会把碰撞检测和夹屏一起带偏。
+fn fence_height(rt: &Runtime, i: usize) -> f32 {
+    match rt.desk.fences.get(i) {
+        Some(f) if f.bounds.h > 0.0 => f.bounds.h,
+        _ => rt.last_layout_h.get(i).copied().unwrap_or(0.0),
+    }
+}
+
+/// 把矩形左上角夹回虚拟屏内（宽高不变；矩形宽高本身超出屏幕时贴左/上边缘）。
+fn clamp_into_screen(x: f32, y: f32, w: f32, h: f32, vw: f32, vh: f32) -> (f32, f32) {
+    (
+        x.clamp(0.0, (vw - w).max(0.0)),
+        y.clamp(0.0, (vh - h).max(0.0)),
+    )
+}
+
+/// DPI / 显示拓扑变化后的统一重排：
+/// - 侧边栏 Dock：尺寸随主题缩放，重新停靠到屏边（任务栏扣除）。
+/// - 普通栅栏：夹回虚拟屏内（真实高度参与，超屏即找回）。
+///
+/// 返回是否有变化（有变化才需要持久化）。启动恢复与 `WM_DPICHANGED`/
+/// `WM_DISPLAYCHANGE` 都走这里，保证同一套语义。
+fn reanchor_fences(rt: &mut Runtime) -> bool {
+    let mut changed = false;
+    for i in 0..rt.desk.fences.len() {
+        if rt.desk.fences[i].appearance.layout == FenceLayout::Sidebar {
+            let wa = work_area_rect(rt.origin.0, rt.origin.1, rt.vw, rt.vh);
+            let b = sidebar_dock_rect(rt.theme.scale, &rt.desk.fences[i], &wa);
+            let b = clamp_sidebar_work_rect(b, wa, rt.desk.fences[i].appearance.sidebar_pos);
+            if rt.desk.fences[i].bounds != b {
+                rt.desk.fences[i].bounds = b;
+                changed = true;
+            }
+        } else {
+            let (nx, ny) = clamp_into_screen(
+                rt.desk.fences[i].bounds.x,
+                rt.desk.fences[i].bounds.y,
+                rt.desk.fences[i].bounds.w,
+                fence_height(rt, i),
+                rt.vw,
+                rt.vh,
+            );
+            if nx != rt.desk.fences[i].bounds.x || ny != rt.desk.fences[i].bounds.y {
+                rt.desk.fences[i].bounds.x = nx;
+                rt.desk.fences[i].bounds.y = ny;
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 /// 把 overlay 窗口设为前台并聚焦（内联编辑接收键盘/IME 的前提）。

@@ -3,25 +3,9 @@
 use crate::*;
 pub(crate) const MENU_ICON_OPEN: usize = 1;
 pub(crate) const MENU_ICON_REMOVE: usize = 2;
-pub(crate) const MENU_LAYOUT: usize = 2000; // + 0=网格 1=列表
-pub(crate) const MENU_ICON_SIZE: usize = 3000; // + 0/1/2 = 32/48/64
-pub(crate) const MENU_STYLE: usize = 4000; // 背景风格子菜单：+0=玻璃 +1=透明 +2=颜色
-pub(crate) const MENU_PASTE: usize = 2500; // 粘贴剪贴板文件
+pub(crate) const MENU_PASTE: usize = 2500;
 pub(crate) const MENU_DELETE_FENCE: usize = 5000;
-pub(crate) const MENU_RENAME_FENCE: usize = 6000; // 重命名栅栏（栅栏内就地编辑）
-pub(crate) const MENU_TINT: usize = 7000; // 背景色调子菜单项：+0=默认，+1..=N 对应预设
-                                          // 菜单动作的具名常量（match 中常量模式不能含算术）
-pub(crate) const MENU_LAYOUT_GRID: usize = MENU_LAYOUT;
-pub(crate) const MENU_LAYOUT_LIST: usize = MENU_LAYOUT + 1;
-pub(crate) const MENU_ICON_SIZE_SMALL: usize = MENU_ICON_SIZE;
-pub(crate) const MENU_ICON_SIZE_MID: usize = MENU_ICON_SIZE + 1;
-pub(crate) const MENU_ICON_SIZE_LARGE: usize = MENU_ICON_SIZE + 2;
-pub(crate) const MENU_STYLE_GLASS: usize = MENU_STYLE;
-pub(crate) const MENU_STYLE_TRANSPARENT: usize = MENU_STYLE + 1;
-pub(crate) const MENU_STYLE_COLOR: usize = MENU_STYLE + 2;
-pub(crate) const MENU_STYLE_BLUR: usize = MENU_STYLE + 3;
-/// 右键菜单「添加…」（单一入口：能选中的直接添加，不做文件/文件夹区分）。
-pub(crate) const MENU_ADD: usize = 1500;
+pub(crate) const MENU_RENAME_FENCE: usize = 6000;
 pub(crate) fn handle_tray_menu(rt: &mut Runtime) {
     const MENU_TRAY_CONSOLE: usize = 8200;
     const MENU_TRAY_QUIT: usize = 8201;
@@ -72,21 +56,10 @@ pub(crate) enum IconMenuAction {
     Remove,
 }
 
-/// 栅栏右键菜单动作。
+/// 栅栏右键菜单动作（精简版：粘贴 / 重命名 / 删除）。
 pub(crate) enum FenceMenuAction {
-    /// 打开原生选择器（文件夹多选模式——Windows 的系统对话框只能单一类型多选；
-    /// 选中的文件夹直接添加进本栅栏，文件走拖拽/粘贴）。
-    Add,
-    /// 从剪贴板粘贴文件进本栅栏。
     Paste,
-    /// 就地重命名栅栏标题。
     Rename,
-    SetLayout(FenceLayout),
-    SetIconSize(f32),
-    /// 设置背景风格（玻璃 / 透明 / 颜色）。
-    SetStyle(FenceStyle),
-    /// 设置背景色调；None = 恢复默认玻璃底色。
-    SetTint(Option<[f32; 3]>),
     Delete,
 }
 
@@ -183,12 +156,6 @@ pub(crate) fn handle_context_menu(
         }
     } else if let Some(action) = fence_context_menu(rt, fence, sx, sy) {
         match action {
-            FenceMenuAction::Add => {
-                if let Some(paths) = pick_paths(rt.hwnd) {
-                    add_paths_to_fence(rt, fence, &paths);
-                    let _ = rt.store.save(&rt.desk);
-                }
-            }
             FenceMenuAction::Paste => {
                 let paths = clipboard_file_paths();
                 if !paths.is_empty() {
@@ -200,37 +167,8 @@ pub(crate) fn handle_context_menu(
             FenceMenuAction::Rename => {
                 start_inplace_rename(rt, EditTarget::FenceTitle { fence });
             }
-            FenceMenuAction::SetLayout(l) => {
-                if l == FenceLayout::List {
-                    let w = list_auto_width(rt, fence);
-                    if let Some(f) = rt.desk.fences.get_mut(fence) {
-                        f.appearance.layout = l;
-                        f.bounds.w = w;
-                    }
-                } else if let Some(f) = rt.desk.fences.get_mut(fence) {
-                    f.appearance.layout = l;
-                }
-                let _ = rt.store.save(&rt.desk);
-            }
-            FenceMenuAction::SetIconSize(s) => {
-                if let Some(f) = rt.desk.fences.get_mut(fence) {
-                    f.appearance.icon_size = s;
-                }
-                let _ = rt.store.save(&rt.desk);
-            }
-            FenceMenuAction::SetStyle(style) => {
-                if let Some(f) = rt.desk.fences.get_mut(fence) {
-                    f.appearance.bg_style = style;
-                }
-                let _ = rt.store.save(&rt.desk);
-            }
-            FenceMenuAction::SetTint(tint) => {
-                if let Some(f) = rt.desk.fences.get_mut(fence) {
-                    f.appearance.tint = tint;
-                }
-                let _ = rt.store.save(&rt.desk);
-            }
             FenceMenuAction::Delete => {
+                // 删除栅栏，不删除链接的文件夹（用户数据不受影响）
                 let ids: Vec<String> = rt
                     .desk
                     .fences
@@ -427,137 +365,45 @@ pub(crate) fn pick_paths(owner: HWND) -> Option<Vec<String>> {
     }
 }
 
-/// 栅栏右键菜单：添加 / 布局 / 图标大小 / 透明度 / 背景色调 / 删除栅栏。
+/// 选择单个文件夹（新建栅栏时用）：弹出系统文件夹选择对话框，返回选中路径。
+pub(crate) fn pick_folder(owner: HWND) -> Option<String> {
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let title = PCWSTR(wide("选择栅栏链接的文件夹").as_ptr());
+        dialog.SetTitle(title).ok()?;
+        let opts = FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM;
+        dialog.SetOptions(opts).ok()?;
+        if dialog.Show(Some(owner)).is_err() {
+            return None;
+        }
+        let item: IShellItem = dialog.GetResult().ok()?;
+        let name: PWSTR = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        name.to_string().ok()
+    }
+}
+
+/// 栅栏右键菜单：粘贴 / 重命名 / 删除（精简版）。
 pub(crate) fn fence_context_menu(
     rt: &mut Runtime,
-    fence: usize,
+    _fence: usize,
     sx: i32,
     sy: i32,
 ) -> Option<FenceMenuAction> {
     let hwnd = rt.hwnd;
-    let app = &rt.desk.fences.get(fence)?.appearance;
-
-    // 布局子菜单
-    let layout_menu = popup_menu();
-    if !layout_menu.is_invalid() {
-        for (i, l) in [FenceLayout::Grid, FenceLayout::List].iter().enumerate() {
-            let flag = if *l == app.layout {
-                MF_STRING | MF_CHECKED
-            } else {
-                MF_STRING
-            };
-            let s = wide(l.label());
-            unsafe {
-                let _ = AppendMenuW(layout_menu, flag, MENU_LAYOUT + i, PCWSTR(s.as_ptr()));
-            }
-        }
-    }
-
-    // 图标大小子菜单：仅网格布局有图标大小概念，列表布局下不生成（隐藏该接口）
-    let mut size_menu = HMENU::default();
-    if app.layout == FenceLayout::Grid {
-        size_menu = popup_menu();
-        if !size_menu.is_invalid() {
-            const SIZES: [(f32, &str); 3] =
-                [(32.0, "小（32）"), (48.0, "中（48）"), (64.0, "大（64）")];
-            for (i, (sz, lb)) in SIZES.iter().enumerate() {
-                let flag = if (app.icon_size - sz).abs() < 0.5 {
-                    MF_STRING | MF_CHECKED
-                } else {
-                    MF_STRING
-                };
-                let s = wide(lb);
-                unsafe {
-                    let _ = AppendMenuW(size_menu, flag, MENU_ICON_SIZE + i, PCWSTR(s.as_ptr()));
-                }
-            }
-        }
-    }
-
-    // 背景色调子菜单：默认（玻璃底色）+ 预设色板
-    let tint_menu = popup_menu();
-    if !tint_menu.is_invalid() {
-        let s = wide("默认（玻璃底色）");
-        let flag_clear = if app.tint.is_none() {
-            MF_STRING | MF_CHECKED
-        } else {
-            MF_STRING
-        };
-        let _ = unsafe { AppendMenuW(tint_menu, flag_clear, MENU_TINT, PCWSTR(s.as_ptr())) };
-        for (i, (lb, c)) in TINT_PRESETS.iter().enumerate() {
-            let s = wide(lb);
-            let flag = if app.tint == Some(*c) {
-                MF_STRING | MF_CHECKED
-            } else {
-                MF_STRING
-            };
-            let _ = unsafe { AppendMenuW(tint_menu, flag, MENU_TINT + 1 + i, PCWSTR(s.as_ptr())) };
-        }
-    }
-
-    // 背景风格子菜单：玻璃 / 透明 / 颜色 / 模糊（四选一，当前风格打勾）
-    let style_menu = popup_menu();
-    if !style_menu.is_invalid() {
-        let styles = [
-            FenceStyle::Glass,
-            FenceStyle::Outline,
-            FenceStyle::Filled,
-            FenceStyle::Blur,
-        ];
-        for (i, st) in styles.iter().enumerate() {
-            let flag = if *st == app.bg_style {
-                MF_STRING | MF_CHECKED
-            } else {
-                MF_STRING
-            };
-            let s = wide(st.label());
-            let _ = unsafe { AppendMenuW(style_menu, flag, MENU_STYLE + i, PCWSTR(s.as_ptr())) };
-        }
-    }
-
-    // 主菜单
     let main = popup_menu();
     if main.is_invalid() {
-        unsafe {
-            let _ = DestroyMenu(layout_menu);
-            let _ = DestroyMenu(size_menu);
-            let _ = DestroyMenu(tint_menu);
-            let _ = DestroyMenu(style_menu);
-        }
         return None;
     }
     unsafe {
-        // 单一「添加…」入口：系统对话框无法文件+文件夹混选（平台限制），用文件夹模式
-        // 多选——能选中的（文件夹）直接添加，不区分「文件 / 文件夹」两个入口。
-        let s = wide("添加…");
-        let _ = AppendMenuW(main, MF_STRING, MENU_ADD, PCWSTR(s.as_ptr()));
-        if !layout_menu.is_invalid() {
-            let s = wide("布局");
-            let _ = AppendMenuW(main, MF_POPUP, layout_menu.0 as usize, PCWSTR(s.as_ptr()));
-        }
-        if !size_menu.is_invalid() {
-            let s = wide("图标大小");
-            let _ = AppendMenuW(main, MF_POPUP, size_menu.0 as usize, PCWSTR(s.as_ptr()));
-        }
-        // 背景风格：玻璃 / 透明 / 颜色（三选一）
-        if !style_menu.is_invalid() {
-            let s = wide("背景风格");
-            let _ = AppendMenuW(main, MF_POPUP, style_menu.0 as usize, PCWSTR(s.as_ptr()));
-        }
-        if !tint_menu.is_invalid() {
-            let s = wide("背景色调");
-            let _ = AppendMenuW(main, MF_POPUP, tint_menu.0 as usize, PCWSTR(s.as_ptr()));
-        }
-        let _ = AppendMenuW(main, MF_SEPARATOR, 0, PCWSTR::null());
+        let s = wide("粘贴文件");
+        let _ = AppendMenuW(main, MF_STRING, MENU_PASTE, PCWSTR(s.as_ptr()));
         let s = wide("重命名栅栏");
         let _ = AppendMenuW(main, MF_STRING, MENU_RENAME_FENCE, PCWSTR(s.as_ptr()));
-        let s = wide("粘贴文件（从剪贴板）");
-        let _ = AppendMenuW(main, MF_STRING, MENU_PASTE, PCWSTR(s.as_ptr()));
         let _ = AppendMenuW(main, MF_SEPARATOR, 0, PCWSTR::null());
         let s = wide("删除栅栏");
         let _ = AppendMenuW(main, MF_STRING, MENU_DELETE_FENCE, PCWSTR(s.as_ptr()));
     }
-
     let cmd = unsafe {
         TrackPopupMenu(
             main,
@@ -571,36 +417,12 @@ pub(crate) fn fence_context_menu(
         .0 as usize
     };
     unsafe {
-        let _ = DestroyMenu(layout_menu);
-        let _ = DestroyMenu(size_menu);
-        let _ = DestroyMenu(tint_menu);
-        let _ = DestroyMenu(style_menu);
         let _ = DestroyMenu(main);
     }
-
-    match cmd as usize {
-        MENU_DELETE_FENCE => Some(FenceMenuAction::Delete),
-        MENU_RENAME_FENCE => Some(FenceMenuAction::Rename),
+    match cmd {
         MENU_PASTE => Some(FenceMenuAction::Paste),
-        MENU_ADD => Some(FenceMenuAction::Add),
-        MENU_STYLE_GLASS => Some(FenceMenuAction::SetStyle(FenceStyle::Glass)),
-        MENU_STYLE_TRANSPARENT => Some(FenceMenuAction::SetStyle(FenceStyle::Outline)),
-        MENU_STYLE_COLOR => Some(FenceMenuAction::SetStyle(FenceStyle::Filled)),
-        MENU_STYLE_BLUR => Some(FenceMenuAction::SetStyle(FenceStyle::Blur)),
-        x if x >= MENU_TINT && x <= MENU_TINT + TINT_PRESETS.len() => {
-            if x == MENU_TINT {
-                Some(FenceMenuAction::SetTint(None))
-            } else {
-                TINT_PRESETS
-                    .get(x - MENU_TINT - 1)
-                    .map(|(_, c)| FenceMenuAction::SetTint(Some(*c)))
-            }
-        }
-        MENU_LAYOUT_GRID => Some(FenceMenuAction::SetLayout(FenceLayout::Grid)),
-        MENU_LAYOUT_LIST => Some(FenceMenuAction::SetLayout(FenceLayout::List)),
-        MENU_ICON_SIZE_SMALL => Some(FenceMenuAction::SetIconSize(32.0)),
-        MENU_ICON_SIZE_MID => Some(FenceMenuAction::SetIconSize(48.0)),
-        MENU_ICON_SIZE_LARGE => Some(FenceMenuAction::SetIconSize(64.0)),
+        MENU_RENAME_FENCE => Some(FenceMenuAction::Rename),
+        MENU_DELETE_FENCE => Some(FenceMenuAction::Delete),
         _ => None,
     }
 }

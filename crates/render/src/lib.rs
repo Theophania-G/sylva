@@ -42,4 +42,4 @@ pub use scene::{
     SceneIcon,
 };
 pub use surface::{CompositionSurface, Frame};
-pub use theme::Theme;
+pub use theme::{Theme, GRID_CAPTION_H_MULT};

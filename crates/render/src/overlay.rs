@@ -18,9 +18,9 @@
 use std::sync::OnceLock;
 
 use windows::core::{Result, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM, TRUE};
 use windows::Win32::Graphics::Gdi::{
-    CombineRgn, CreateRectRgn, CreateSolidBrush, DeleteObject, SetBkColor, SetTextColor,
+    CombineRgn, CreateRectRgn, CreateSolidBrush, DeleteObject, EqualRgn, SetBkColor, SetTextColor,
     SetWindowRgn, HBRUSH, HDC, HRGN, RGN_OR,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -40,16 +40,18 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+    GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowThreadProcessId, KillTimer, LoadCursorW, LoadIconW, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, CS_DBLCLKS, GWLP_USERDATA, HCURSOR, HICON, HTCLIENT, HTTRANSPARENT, ICON_BIG,
-    ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MSG,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNA,
-    SW_SHOWNOACTIVATE, WM_CHAR, WM_CTLCOLOREDIT, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY,
+    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TranslateMessage, CS_DBLCLKS, GWLP_USERDATA, HCURSOR, HICON, HTCLIENT,
+    HTTRANSPARENT, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
+    IDC_SIZENWSE, IDC_SIZEWE, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_SHOWNA,
+    SW_SHOWNOACTIVATE, WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DROPFILES, WM_ERASEBKGND, WM_HOTKEY,
     WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION,
     WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETICON, WM_TIMER,
+    WM_DISPLAYCHANGE, WM_DPICHANGED,
     WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
@@ -103,6 +105,8 @@ pub const CORNER_RESIZE: f32 = 12.0;
 /// 按下与松开间鼠标位移小于该值即视为「单击」（选中图标，如资源管理器）；
 /// 超过则视为拖动（移动栅栏）。
 pub const CLICK_DRAG_THRESHOLD: f32 = 5.0;
+/// 侧边栏图标拖动排序的启动阈值（像素）：按下后移动超过此距离才进入 reorder 模式。
+const REORDER_THRESHOLD: f32 = 8.0;
 
 /// 类只注册一次（同一 HINSTANCE）。
 static CLASS_REGISTERED: OnceLock<()> = OnceLock::new();
@@ -135,6 +139,8 @@ pub struct FenceHit {
     /// 侧边栏悬停工具提示矩形（可延伸到栅栏之外）；None = 无。用于把工具提示
     /// 区域并入窗口区域，否则区域外的绘制不可见。
     pub tooltip: Option<RectF>,
+    /// 是否为侧边栏布局（用于拖动排序判定）。
+    pub is_sidebar: bool,
 }
 
 /// 一个图标的命中数据。`fence` / `icon` 分别是 App 层 `desk.fences` 下标
@@ -310,6 +316,17 @@ pub enum OverlayEvent {
     /// 动画定时器触发（ANIM_TIMER，16ms）：App 推进控制台面板/待办行动画。
     /// 无动画进行时 App 调用 `OverlayWindow::set_anim_active(false)` 停止本定时器。
     AnimTick,
+    /// 所在显示器 DPI 变化（`WM_DPICHANGED`）：`dpi` 为新 x-DPI。
+    /// App 据此重算主题缩放并重新夹屏 + 重绘（Per-Monitor v2 下的实时跟随）。
+    DpiChanged { dpi: u32 },
+    /// 显示拓扑/分辨率变化（`WM_DISPLAYCHANGE`）：虚拟屏宽高可能已变。
+    /// App 据此重算虚拟屏尺寸并重新夹屏 + 重绘（找回超屏栅栏）。
+    DisplayChange,
+    /// 侧边栏图标拖动中（重排序）：`icon` 是被拖动的图标在 `icon_ids` 中的下标，
+    /// `(mx, my)` 为当前光标位置（虚拟屏幕物理像素）。
+    SidebarReorderDrag { fence: usize, icon: usize, mx: f32, my: f32 },
+    /// 侧边栏图标拖动结束：`from` 是原始下标，`to` 是目标插入位置。
+    SidebarReorderEnd { fence: usize, from: usize, to: usize },
 }
 
 /// 拖拽会话（按下到松开之间持续有效）。
@@ -339,6 +356,8 @@ enum DragKind {
     ConsoleMove,
     /// 控制台右/下边缘或右下角拖动 → 缩放面板（锚定左上角）。
     ConsoleResize(ResizeZone),
+    /// 侧边栏图标拖动 → 重新排序。
+    SidebarReorder,
 }
 
 struct WindowState {
@@ -350,6 +369,12 @@ struct WindowState {
     console_hovered: Option<ConsoleZone>,
     /// 上次上报的光标位置（仅位置变化才发 CursorMove，避免无谓重绘）。
     last_cursor: Option<(f32, f32)>,
+    /// 上次 SetWindowRgn 的区域句柄：区域几何未变时跳过 SetWindowRgn。
+    ///
+    /// SetWindowRgn 会使窗口无效并触发整窗重绘/重合成（即使区域完全相同），
+    /// Dock 存在时光标移动每次都会 set_model 到这里——反复调用造成无谓 CPU 与
+    /// 边缘重绘抖动。区域句柄所有权归窗口（系统释放），此处仅保存引用用于 EqualRgn。
+    last_region: Option<HRGN>,
     /// App 层事件处理器；返回新的命中模型以同步区域与命中数据。
     ///
     /// 返回 `None` 表示丢弃本事件、保持当前命中模型：App 在模态菜单 / 属性页等
@@ -403,9 +428,11 @@ impl OverlayWindow {
 
         let (vx, vy, vw, vh) = virtual_screen();
 
-        // 父窗口屏幕左上角 → 子窗口定位（WorkerW 无边框无标题，outer≈client）
-        let mut parent_rect = RECT::default();
-        unsafe { GetWindowRect(parent, &mut parent_rect)? };
+        // 窗口直接定位在虚拟屏原点 (vx, vy)：客户端 (0,0) = 虚拟屏 (0,0)，栅栏的
+        // 虚拟屏幕坐标即可直接作为客户端坐标绘制/命中，无需任何换算。
+        // 旧版减去 `parent_rect.left/top` 会把窗口挪偏——单屏下 (0,0) 减了无感，
+        // 副屏在主屏左/上（vx/vy≠0）时窗口与合成器坐标同时错位，正是多屏栅栏位置
+        // 错乱、模糊栅栏对不上边框的根因之一。这里只保留父窗口的 z 序/所有权关系。
 
         // 编辑框暗色背景画刷（重命名/待办输入共用），与玻璃卡片面板填充色完全一致
         // （面板填充 [0.062,0.086,0.133]≈RGB(16,22,34)），输入框与面板无缝一体，
@@ -417,6 +444,7 @@ impl OverlayWindow {
             hovered: None,
             console_hovered: None,
             last_cursor: None,
+            last_region: None,
             handler: None,
             edit_brush,
         });
@@ -436,8 +464,8 @@ impl OverlayWindow {
                 // 窗口标题：任务栏按钮/悬停提示显示「Sylva」（留空会退回进程名 sylva.exe）
                 PCWSTR(wide("Sylva").as_ptr()),
                 WS_POPUP,
-                vx - parent_rect.left,
-                vy - parent_rect.top,
+                vx,
+                vy,
                 vw,
                 vh,
                 Some(parent),
@@ -553,7 +581,7 @@ impl OverlayWindow {
     pub fn set_model(&self, model: HitModel) {
         let state = unsafe { &mut *self.state };
         state.model = model;
-        apply_region(self.hwnd, &state.model);
+        apply_region(self.hwnd, &state.model, &mut state.last_region);
     }
 
     /// 设置用户交互事件处理器。回调返回新的命中模型（由 App 根据新布局生成），
@@ -571,6 +599,27 @@ impl OverlayWindow {
             } else {
                 let _ = KillTimer(Some(self.hwnd), ANIM_TIMER);
             }
+        }
+    }
+
+    /// 显示拓扑变化后把 overlay 重设到新的虚拟屏幕（移动 + 缩放）。
+    /// `(vx, vy)` 为新虚拟屏原点（副屏在左/上时可负），`w×h` 为虚拟屏尺寸。
+    /// 客户端坐标始终 = 虚拟屏幕坐标，无需换算（见 `create`）。
+    pub fn resize(&mut self, vx: i32, vy: i32, w: u32, h: u32) {
+        self.x = vx;
+        self.y = vy;
+        self.width = w;
+        self.height = h;
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                vx,
+                vy,
+                w as i32,
+                h as i32,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOREDRAW,
+            );
         }
     }
 }
@@ -680,10 +729,25 @@ unsafe extern "system" fn proxy_proc(
 ///
 /// `SetWindowRgn` 接管区域所有权：旧区域由系统自动释放，新建的区域交给窗口后
 /// 不可再手动删除；中间产生的单矩形区域在合并进结果后立即删除。
-fn apply_region(hwnd: HWND, model: &HitModel) {
-    if let Some(rgn) = build_region(model) {
-        unsafe { SetWindowRgn(hwnd, Some(rgn), true) };
+///
+/// `cached` 保存上次交给窗口的区域句柄（所有权在窗口）。区域几何与上次完全相同时
+/// 直接跳过 SetWindowRgn——该调用会让窗口失效、强制重绘/重合成，悬停/光标移动期间
+/// 区域几乎总是不变，反复调用只会增加 CPU 与重绘抖动（Dock 场景尤其明显）。
+fn apply_region(hwnd: HWND, model: &HitModel, cached: &mut Option<HRGN>) {
+    let Some(rgn) = build_region(model) else {
+        return;
+    };
+    if let Some(prev) = cached {
+        unsafe {
+            if EqualRgn(*prev, rgn) == TRUE {
+                // 区域没变：丢弃新句柄，保留旧句柄（仍归窗口所有，系统管理释放）。
+                let _ = DeleteObject(rgn.into());
+                return;
+            }
+        }
     }
+    unsafe { SetWindowRgn(hwnd, Some(rgn), true) };
+    *cached = Some(rgn);
 }
 
 /// 把全部栅栏矩形 + 侧边栏工具提示 + 内联编辑框 + 控制台面板合并成一个区域
@@ -997,6 +1061,31 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        // 所在显示器 DPI 变化（Per-Monitor v2）：`wParam` 低位 = 新 x-DPI。
+        // App 重算主题缩放 + 重新夹屏 + 重绘，栅栏/文字实时跟随缩放（不再等 DWM 拉伸）。
+        WM_DPICHANGED => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::DpiChanged {
+                        dpi: (wparam.0 & 0xFFFF) as u32,
+                    },
+                );
+            }
+            LRESULT(0)
+        }
+        // 显示拓扑/分辨率变化：虚拟屏宽高可能已变，App 重算并夹回超屏栅栏。
+        WM_DISPLAYCHANGE => {
+            let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
+            if !ptr.is_null() {
+                let state = unsafe { &mut *ptr };
+                emit_event(hwnd, state, OverlayEvent::DisplayChange);
+            }
+            LRESULT(0)
+        }
         // —— 内联文本编辑：键盘与 IME 直达 App（overlay 获得焦点时）——
         WM_KEYDOWN => {
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut WindowState;
@@ -1089,6 +1178,13 @@ unsafe extern "system" fn wnd_proc(
         }
         // 外部信号：干净退出消息循环（wnd_proc 跑在主线程，PostQuitMessage 投递到主队列）
         WM_APP_QUIT => {
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        // 外部关闭请求（用户点关闭按钮 / Alt+F4 / 任务管理器「结束任务」发 WM_CLOSE）：
+        // 走干净退出，让 RAII 恢复被隐藏的真实桌面图标——硬杀会跳过 Drop，桌面图标
+        // 永久消失（卸载程序不再强杀，用户手动关闭即走到这里）。
+        WM_CLOSE => {
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
@@ -1210,6 +1306,15 @@ fn on_button_down(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     }
     for f in &state.model.fences {
         if f.title.contains(mx, my) {
+            // 侧边栏图标上点击不启动拖动（留给 mouseup 作为单击打开文件）
+            let on_icon = state
+                .model
+                .icons
+                .iter()
+                .any(|i| i.fence == f.id && i.rect.contains(mx, my));
+            if on_icon {
+                break; // 跳到下方 body+图标处理
+            }
             state.drag = Some(DragState {
                 kind: DragKind::Move,
                 fence: f.id,
@@ -1339,6 +1444,7 @@ fn zone_cursor(zone: ResizeZone) -> HCURSOR {
 
 /// 光标处的形状（参考 Windows 资源管理器：只有标题栏/缩放区有特殊光标）：
 /// 边缘/角 → 对应 resize 光标；标题栏 → 移动光标；图标/空白一律普通箭头。
+/// 侧边栏：图标上保持箭头（点击打开），空白处才显示移动把手。
 fn cursor_at(model: &HitModel, mx: f32, my: f32) -> HCURSOR {
     // 控制台面板：边缘/角 = resize 光标，控件/空白 = 箭头，标题栏 = 移动光标
     if let Some(c) = &model.console {
@@ -1362,7 +1468,15 @@ fn cursor_at(model: &HitModel, mx: f32, my: f32) -> HCURSOR {
     if let Some(zone) = resize_zone_at(f, mx, my) {
         return zone_cursor(zone);
     }
-    // 非缩放区：只有标题栏是移动把手，正文/图标保持箭头（像资源管理器）。
+    // 侧边栏：图标上保持箭头（单击打开），只有空白处显示移动光标
+    let on_icon = model
+        .icons
+        .iter()
+        .any(|i| i.fence == f.id && i.rect.contains(mx, my));
+    if on_icon {
+        return unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() };
+    }
+    // 非缩放区：标题栏是移动把手，正文/图标保持箭头（像资源管理器）。
     if f.title.contains(mx, my) {
         return unsafe { LoadCursorW(None, IDC_SIZEALL).unwrap_or_default() };
     }
@@ -1402,6 +1516,39 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
     let orig = drag.orig;
     match drag.kind {
         DragKind::Move => {
+            // 侧边栏图标上按下 + 移动超阈值 → 切换为拖动排序模式
+            if let Some(icon_idx) = drag.pressed_icon {
+                let is_sidebar = state
+                    .model
+                    .fences
+                    .iter()
+                    .find(|f| f.id == drag.fence)
+                    .map(|f| f.is_sidebar)
+                    .unwrap_or(false);
+                let dx = mx - drag.start.0;
+                let dy = my - drag.start.1;
+                if is_sidebar && (dx * dx + dy * dy) > REORDER_THRESHOLD * REORDER_THRESHOLD {
+                    state.drag = Some(DragState {
+                        kind: DragKind::SidebarReorder,
+                        fence: drag.fence,
+                        start: drag.start,
+                        orig: drag.orig,
+                        pressed_icon: Some(icon_idx),
+                        ctrl: false,
+                    });
+                    emit_event(
+                        hwnd,
+                        state,
+                        OverlayEvent::SidebarReorderDrag {
+                            fence: drag.fence,
+                            icon: icon_idx,
+                            mx,
+                            my,
+                        },
+                    );
+                    return;
+                }
+            }
             // 原始目标左上角 = 按下时矩形左上角 + 鼠标相对按下点的位移
             let raw_x = orig.x + (mx - drag.start.0);
             let raw_y = orig.y + (my - drag.start.1);
@@ -1410,6 +1557,20 @@ fn on_mouse_move(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
                 pos: (raw_x, raw_y),
             };
             emit_event(hwnd, state, event);
+        }
+        DragKind::SidebarReorder => {
+            if let Some(icon_idx) = drag.pressed_icon {
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::SidebarReorderDrag {
+                        fence: drag.fence,
+                        icon: icon_idx,
+                        mx,
+                        my,
+                    },
+                );
+            }
         }
         DragKind::Select => {
             // 橡皮筋框选：从按下点到当前点围成矩形，框中的本栅栏图标全部选中
@@ -1543,9 +1704,27 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
         } else if let DragKind::ConsoleResize(_) = drag.kind {
             // 控制台缩放结束：App 持久化尺寸
             emit_event(hwnd, state, OverlayEvent::ConsoleResizeEnd);
+        } else if drag.kind == DragKind::SidebarReorder {
+            // 侧边栏拖动排序结束：通知 App 执行重排
+            if let Some(icon_idx) = drag.pressed_icon {
+                // 计算目标位置：根据光标位置在侧边栏中的相对偏移推算插入下标
+                let to = compute_reorder_target(&state.model, drag.fence, icon_idx, mx, my);
+                emit_event(
+                    hwnd,
+                    state,
+                    OverlayEvent::SidebarReorderEnd {
+                        fence: drag.fence,
+                        from: icon_idx,
+                        to,
+                    },
+                );
+            }
         }
         // 框选/控制台拖拽不是栅栏布局变化，不触发栅栏持久化
-        if matches!(drag.kind, DragKind::Move | DragKind::Resize(_)) {
+        if matches!(
+            drag.kind,
+            DragKind::Move | DragKind::Resize(_) | DragKind::SidebarReorder
+        ) {
             emit_event(
                 hwnd,
                 state,
@@ -1555,6 +1734,49 @@ fn on_button_up(hwnd: HWND, state: &mut WindowState, mx: f32, my: f32) {
         unsafe {
             let _ = ReleaseCapture();
         }
+    }
+}
+
+/// 根据光标位置计算侧边栏图标重排的目标插入位置。
+/// 返回值为插入下标（0..=图标总数）：图标将被插入到该下标之前。
+fn compute_reorder_target(model: &HitModel, fence_id: usize, _from: usize, mx: f32, my: f32) -> usize {
+    // 收集该栅栏的所有图标，按 x 坐标排序（横向侧边栏）或 y 坐标排序（纵向）
+    let mut icons: Vec<_> = model
+        .icons
+        .iter()
+        .filter(|i| i.fence == fence_id)
+        .collect();
+    if icons.is_empty() {
+        return 0;
+    }
+    // 判断侧边栏方向：如果图标 x 变化大于 y 变化，为横向（top），否则纵向（left/right）
+    let first = &icons[0];
+    let is_horizontal = if icons.len() > 1 {
+        let second = &icons[1];
+        (second.rect.x - first.rect.x).abs() > (second.rect.y - first.rect.y).abs()
+    } else {
+        true // 单图标默认横向
+    };
+    if is_horizontal {
+        // 横向：按 x 排序，找光标 x 落在哪两个图标之间
+        icons.sort_by(|a, b| a.rect.x.partial_cmp(&b.rect.x).unwrap());
+        for (i, icon) in icons.iter().enumerate() {
+            let mid = icon.rect.x + icon.rect.w / 2.0;
+            if mx < mid {
+                return i;
+            }
+        }
+        icons.len()
+    } else {
+        // 纵向：按 y 排序，找光标 y 落在哪两个图标之间
+        icons.sort_by(|a, b| a.rect.y.partial_cmp(&b.rect.y).unwrap());
+        for (i, icon) in icons.iter().enumerate() {
+            let mid = icon.rect.y + icon.rect.h / 2.0;
+            if my < mid {
+                return i;
+            }
+        }
+        icons.len()
     }
 }
 
@@ -1587,7 +1809,7 @@ fn emit_event(hwnd: HWND, state: &mut WindowState, event: OverlayEvent) {
         // None = 模态期间再入被丢弃，保持当前命中模型（见 `set_event_handler` 注释）
         if let Some(model) = handler(event) {
             state.model = model;
-            apply_region(hwnd, &state.model);
+            apply_region(hwnd, &state.model, &mut state.last_region);
         }
     }
 }
@@ -1711,6 +1933,7 @@ mod tests {
                     },
                     id: 0,
                     tooltip: None,
+                    is_sidebar: false,
                 },
                 FenceHit {
                     body: RectF {
@@ -1733,6 +1956,7 @@ mod tests {
                     },
                     id: 1,
                     tooltip: None,
+                    is_sidebar: false,
                 },
             ],
             icons: vec![],

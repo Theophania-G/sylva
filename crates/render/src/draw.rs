@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteTextFormat, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_MEASURING_MODE_NATURAL, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 
@@ -30,7 +30,7 @@ use sylva_shell::icons::IconData;
 
 use crate::overlay::{ConsoleZone, RectF};
 use crate::scene::{ListColumns, Scene, SceneConsole, SceneEdit, SceneFence, SceneFenceDetail};
-use crate::theme::{TextStyle, Theme};
+use crate::theme::{GRID_CAPTION_H_MULT, TextStyle, Theme};
 
 /// 图标位图缓存：`bitmap_id` → 设备上的 D2D 位图。
 ///
@@ -88,6 +88,9 @@ pub struct TextFormats {
     /// 粗体标题（控制中心顶部「Sylva」）。
     pub title_bold: IDWriteTextFormat,
     pub label: IDWriteTextFormat,
+    /// 就地编辑框文字：同 `label` 字号，但段落垂直居中——编辑框内字形上下留白均匀，
+    /// 高 DPI 下也不会贴着框顶被裁。
+    pub edit: IDWriteTextFormat,
     /// 待办副行（详细信息）用小一号字号。
     pub detail: IDWriteTextFormat,
 }
@@ -99,6 +102,11 @@ impl TextFormats {
         tracing::debug!("TextFormats: 标题格式就绪");
         let label = make_text_format(dwrite, theme.label, DWRITE_FONT_WEIGHT_NORMAL)?;
         tracing::debug!("TextFormats: 标签格式就绪");
+        // 编辑框文字格式 = 标签字号 + 垂直居中（就地重命名用）。
+        let edit = make_text_format(dwrite, theme.label, DWRITE_FONT_WEIGHT_NORMAL)?;
+        unsafe {
+            edit.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        }
         let detail_style = crate::theme::TextStyle {
             font_family: theme.label.font_family,
             size: theme.label.size * 0.72,
@@ -110,6 +118,7 @@ impl TextFormats {
             title,
             title_bold,
             label,
+            edit,
             detail,
         })
     }
@@ -403,18 +412,20 @@ fn draw_fence_detail(
 
     let label_x = d.rect.x + 2.0 * s;
     let label_w = 40.0 * s;
-    let row_y = |i: usize| d.rect.y + 26.0 * s + i as f32 * 30.0 * s;
     let label_brush =
         unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.45 * full_t]), None)? };
 
-    // 布局
-    let lr = D2D_RECT_F {
-        left: label_x,
-        top: row_y(0) + 2.0 * s,
-        right: label_x + label_w,
-        bottom: row_y(0) + 24.0 * s,
-    };
-    draw_text(target, "布局", &formats.detail, lr, &label_brush);
+    // 布局（始终显示）
+    let r0 = d.layout_grid;
+    if r0.h > 0.0 {
+        let lr = D2D_RECT_F {
+            left: label_x,
+            top: r0.y + 2.0 * s,
+            right: label_x + label_w,
+            bottom: r0.y + 24.0 * s,
+        };
+        draw_text(target, "布局", &formats.detail, lr, &label_brush);
+    }
     draw_segmented_button(
         target,
         theme,
@@ -455,39 +466,44 @@ fn draw_fence_detail(
         accent,
     );
 
-    // 图标大小
-    let lr2 = D2D_RECT_F {
-        left: label_x,
-        top: row_y(1) + 2.0 * s,
-        right: label_x + label_w,
-        bottom: row_y(1) + 24.0 * s,
-    };
-    draw_text(target, "大小", &formats.detail, lr2, &label_brush);
-    for (rect, val, label) in [
-        (d.size_s, 32.0, "小"),
-        (d.size_m, 48.0, "中"),
-        (d.size_l, 64.0, "大"),
-    ] {
-        draw_segmented_button(
-            target,
-            theme,
-            rect,
-            label,
-            (d.icon_size - val).abs() < 0.5,
-            matches!(c.hover_zone, Some(ConsoleZone::FenceIconSize(v)) if (v - val).abs() < 0.5),
-            formats,
-            accent,
-        );
+    // 图标大小（仅网格布局显示）
+    if d.size_s.h > 0.0 {
+        let lr2 = D2D_RECT_F {
+            left: label_x,
+            top: d.size_s.y + 2.0 * s,
+            right: label_x + label_w,
+            bottom: d.size_s.y + 24.0 * s,
+        };
+        draw_text(target, "大小", &formats.detail, lr2, &label_brush);
+        for (rect, val, label) in [
+            (d.size_s, 32.0, "小"),
+            (d.size_m, 48.0, "中"),
+            (d.size_l, 64.0, "大"),
+        ] {
+            draw_segmented_button(
+                target,
+                theme,
+                rect,
+                label,
+                (d.icon_size - val).abs() < 0.5,
+                matches!(c.hover_zone, Some(ConsoleZone::FenceIconSize(v)) if (v - val).abs() < 0.5),
+                formats,
+                accent,
+            );
+        }
     }
 
-    // 背景风格
-    let lr3 = D2D_RECT_F {
-        left: label_x,
-        top: row_y(2) + 2.0 * s,
-        right: label_x + label_w,
-        bottom: row_y(2) + 24.0 * s,
-    };
-    draw_text(target, "风格", &formats.detail, lr3, &label_brush);
+    // 背景风格（始终显示）
+    let r2 = d.style_glass;
+    if r2.h > 0.0 {
+        let lr3 = D2D_RECT_F {
+            left: label_x,
+            top: r2.y + 2.0 * s,
+            right: label_x + label_w,
+            bottom: r2.y + 24.0 * s,
+        };
+        draw_text(target, "风格", &formats.detail, lr3, &label_brush);
+    }
     draw_segmented_button(
         target,
         theme,
@@ -541,40 +557,45 @@ fn draw_fence_detail(
         accent,
     );
 
-    // 色调色板：默认（玻璃底）+ 预设色
-    let lr4 = D2D_RECT_F {
-        left: label_x,
-        top: row_y(3) + 2.0 * s,
-        right: label_x + label_w,
-        bottom: row_y(3) + 22.0 * s,
-    };
-    draw_text(target, "色调", &formats.detail, lr4, &label_brush);
-    draw_tint_swatch(
-        target,
-        theme,
-        d.tint_default,
-        [0.20, 0.24, 0.32],
-        d.tint.is_none(),
-        matches!(c.hover_zone, Some(ConsoleZone::FenceTint(None))),
-        accent,
-    )?;
-    for (i, rect) in d.tints.iter().enumerate() {
-        if let Some(rgb) = TINT_COLORS.get(i) {
-            let rgb = *rgb;
-            let active = d.tint == Some(rgb);
-            let hover = matches!(c.hover_zone, Some(ConsoleZone::FenceTint(Some(t))) if t == rgb);
-            draw_tint_swatch(target, theme, *rect, rgb, active, hover, accent)?;
+    // 色调色板：默认（玻璃底）+ 预设色（模糊风格时隐藏）
+    if d.tint_default.h > 0.0 {
+        let lr4 = D2D_RECT_F {
+            left: label_x,
+            top: d.tint_default.y + 2.0 * s,
+            right: label_x + label_w,
+            bottom: d.tint_default.y + 22.0 * s,
+        };
+        draw_text(target, "色调", &formats.detail, lr4, &label_brush);
+        draw_tint_swatch(
+            target,
+            theme,
+            d.tint_default,
+            [0.20, 0.24, 0.32],
+            d.tint.is_none(),
+            matches!(c.hover_zone, Some(ConsoleZone::FenceTint(None))),
+            accent,
+        )?;
+        for (i, rect) in d.tints.iter().enumerate() {
+            if let Some(rgb) = TINT_COLORS.get(i) {
+                let rgb = *rgb;
+                let active = d.tint == Some(rgb);
+                let hover = matches!(c.hover_zone, Some(ConsoleZone::FenceTint(Some(t))) if t == rgb);
+                draw_tint_swatch(target, theme, *rect, rgb, active, hover, accent)?;
+            }
         }
     }
 
-    // 存储位置行
-    let lr5 = D2D_RECT_F {
-        left: label_x,
-        top: row_y(4) + 2.0 * s,
-        right: label_x + label_w,
-        bottom: row_y(4) + 24.0 * s,
-    };
-    draw_text(target, "存储", &formats.detail, lr5, &label_brush);
+    // 存储位置行（始终显示）
+    let r4 = d.storage_btn;
+    if r4.h > 0.0 {
+        let lr5 = D2D_RECT_F {
+            left: label_x,
+            top: r4.y + 2.0 * s,
+            right: label_x + label_w,
+            bottom: r4.y + 24.0 * s,
+        };
+        draw_text(target, "存储", &formats.detail, lr5, &label_brush);
+    }
     let storage_hover = matches!(c.hover_zone, Some(ConsoleZone::ChangeStoragePath));
     draw_segmented_button(
         target,
@@ -587,30 +608,27 @@ fn draw_fence_detail(
         accent,
     );
 
-    // 侧边栏停靠位置（仅 Sidebar 布局时高亮可用）
-    let lr6 = D2D_RECT_F {
-        left: label_x,
-        top: row_y(5) + 2.0 * s,
-        right: label_x + label_w,
-        bottom: row_y(5) + 24.0 * s,
-    };
-    let pos_label_alpha = if d.layout == FenceLayout::Sidebar {
-        0.45
-    } else {
-        0.20
-    };
-    let pos_label_brush = unsafe {
-        target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, pos_label_alpha * full_t]), None)?
-    };
-    draw_text(target, "位置", &formats.detail, lr6, &pos_label_brush);
-    for (rect, pos, label) in [
-        (d.sidebar_left, SidebarPosition::Left, "左"),
-        (d.sidebar_top, SidebarPosition::Top, "上"),
-        (d.sidebar_right, SidebarPosition::Right, "右"),
-    ] {
-        let active = d.sidebar_pos == pos && d.layout == FenceLayout::Sidebar;
-        let hover = matches!(c.hover_zone, Some(ConsoleZone::FenceSidebarPos(p)) if p == pos);
-        draw_segmented_button(target, theme, rect, label, active, hover, formats, accent);
+    // 侧边栏停靠位置（仅 Sidebar 布局时显示）
+    if d.sidebar_left.h > 0.0 {
+        let lr6 = D2D_RECT_F {
+            left: label_x,
+            top: d.sidebar_left.y + 2.0 * s,
+            right: label_x + label_w,
+            bottom: d.sidebar_left.y + 24.0 * s,
+        };
+        let pos_label_brush = unsafe {
+            target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.45 * full_t]), None)?
+        };
+        draw_text(target, "位置", &formats.detail, lr6, &pos_label_brush);
+        for (rect, pos, label) in [
+            (d.sidebar_left, SidebarPosition::Left, "左"),
+            (d.sidebar_top, SidebarPosition::Top, "上"),
+            (d.sidebar_right, SidebarPosition::Right, "右"),
+        ] {
+            let active = d.sidebar_pos == pos && d.layout == FenceLayout::Sidebar;
+            let hover = matches!(c.hover_zone, Some(ConsoleZone::FenceSidebarPos(p)) if p == pos);
+            draw_segmented_button(target, theme, rect, label, active, hover, formats, accent);
+        }
     }
 
     Ok(())
@@ -894,6 +912,12 @@ fn draw_fence_inner(
     }
 
     for (ii, icon) in fence.icons.iter().enumerate() {
+        // 拖动中的图标跳过原位绘制（最后单独绘制在光标处，放大+半透明）
+        if let Some(reorder) = &fence.reorder_drag {
+            if ii == reorder.icon_idx {
+                continue;
+            }
+        }
         // 悬停放大：以图标中心放大（scale 由 App 层补间填值），并垫一层柔光
         let grow = (icon.size * (icon.scale - 1.0) * 0.5).max(0.0);
         let dest = D2D_RECT_F {
@@ -941,13 +965,16 @@ fn draw_fence_inner(
             //（见 draw_fence_inner 末尾的 tooltip_rect 绘制）。
             FenceLayout::Sidebar => {}
             FenceLayout::Grid => {
+                // 标签横跨整格（格宽由 App 层按「图标+间距，保底 1.5×图标宽」算好），
+                // 两行排布、第二行放不下补省略号（见 draw_caption）。
+                let caption_h = theme.label.size * GRID_CAPTION_H_MULT;
                 let lr = D2D_RECT_F {
                     left: icon.x - 2.0,
                     top: icon.y + icon.size + theme.icon_caption_gap,
-                    right: icon.x + icon.size + 2.0,
-                    bottom: icon.y + icon.size + theme.icon_caption_gap + theme.label.size * 1.6,
+                    right: icon.x + fence.grid_cell_w - 2.0,
+                    bottom: icon.y + icon.size + theme.icon_caption_gap + caption_h,
                 };
-                draw_text(target, &icon.label, &formats.label, lr, &brushes.label);
+                draw_caption(target, &icon.label, &formats.label, lr, &brushes.label);
             }
             FenceLayout::List => {
                 // 列表：名称在图标右侧；类型/修改日期/大小按列对齐。
@@ -1007,6 +1034,32 @@ fn draw_fence_inner(
             }
         }
     }
+
+    // 侧边栏拖动排序：绘制被拖动的图标（跟随光标，放大+半透明）
+    if let Some(reorder) = &fence.reorder_drag {
+        if let Some(icon) = fence.icons.get(reorder.icon_idx) {
+            if let Some(bmp) = icons.get(icon.bitmap_id) {
+                let drag_size = icon.size * 1.15;
+                let half = drag_size / 2.0;
+                let drag_dest = D2D_RECT_F {
+                    left: reorder.cursor_x - half,
+                    top: reorder.cursor_y - half,
+                    right: reorder.cursor_x + half,
+                    bottom: reorder.cursor_y + half,
+                };
+                unsafe {
+                    target.DrawBitmap(
+                        bmp,
+                        Some(&drag_dest),
+                        0.8,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
     unsafe { target.PopAxisAlignedClip() };
 
     // 框选橡皮筋：半透明蓝 + 边线，裁剪在本栅栏内容区内（拖出栅栏也不越界）。
@@ -1328,7 +1381,7 @@ fn draw_inline_edit(
                 bottom: top0 + li as f32 * line_h + font * 1.6,
             };
             let tb = unsafe { target.CreateSolidColorBrush(&color([1.0, 1.0, 1.0, 0.92]), None)? };
-            draw_text(target, &text, &formats.label, lr, &tb);
+            draw_text(target, &text, &formats.edit, lr, &tb);
             if e.focused && is_caret {
                 let before: String = line.chars().take(e.col).collect();
                 let before_w =
@@ -1390,11 +1443,86 @@ fn truncate_to_fit<'a>(text: &'a str, max_w: f32, font_size: f32) -> std::borrow
     std::borrow::Cow::Owned(out)
 }
 
+/// 网格图标文件名标签：最多两行，第一行塞满、第二行放不下时末尾补省略号。
+/// 手工断行后以 `\n` 交给 DWrite（NO_WRAP 格式下 `\n` 仍恒产生换行），
+/// 避免长文件名被单行截断掉大半。估算口径与 `truncate_to_fit` 一致（CJK 1.0、
+/// ASCII 0.62 倍字宽，DWrite 实际 CJK 正好 1.0 em、ASCII 更窄，偏保守不超宽）。
+fn draw_caption(
+    target: &ID2D1RenderTarget,
+    text: &str,
+    format: &IDWriteTextFormat,
+    rect: D2D_RECT_F,
+    brush: &ID2D1SolidColorBrush,
+) {
+    let font_size = unsafe { format.GetFontSize() };
+    let max_w = (rect.right - rect.left).max(0.0);
+    let shown = wrap_two_lines(text, max_w, font_size);
+    let wide: Vec<u16> = shown.encode_utf16().collect();
+    unsafe {
+        target.DrawText(
+            &wide,
+            format,
+            &rect,
+            brush,
+            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+    }
+}
+
+/// 把文本断成最多两行（第二行末尾放不下时补省略号），返回含 `\n` 的字符串。
+fn wrap_two_lines(text: &str, max_w: f32, font_size: f32) -> String {
+    if text.is_empty() || max_w <= 0.0 {
+        return String::new();
+    }
+    // 单行放得下：整串返回（DWrite 单行绘制）
+    if text_fits(text, max_w, font_size) {
+        return text.to_string();
+    }
+    let ell = "…";
+    let ell_w = text_estimate_width(ell, font_size);
+    // 第一行：贪心塞满 max_w
+    let mut line1 = String::new();
+    for c in text.chars() {
+        if text_estimate_width(&line1, font_size) + char_w(c, font_size) > max_w {
+            break;
+        }
+        line1.push(c);
+    }
+    let rest = &text[line1.len()..];
+    if rest.is_empty() {
+        return line1;
+    }
+    // 第二行：预算预留省略号宽度
+    let budget = (max_w - ell_w).max(font_size * 0.5);
+    let mut line2 = String::new();
+    for c in rest.chars() {
+        if text_estimate_width(&line2, font_size) + char_w(c, font_size) > budget {
+            break;
+        }
+        line2.push(c);
+    }
+    let rest2 = &rest[line2.len()..];
+    let mut out = line1;
+    out.push('\n');
+    out.push_str(&line2);
+    if !rest2.is_empty() {
+        out.push_str(ell);
+    }
+    out
+}
+
+/// 单个字符估算宽（与 `estimate_width` 同口径）。
+fn char_w(c: char, font_size: f32) -> f32 {
+    (if c.is_ascii() { 0.62 } else { 1.0 }) * font_size
+}
+
 /// 图标标签可用的最大宽度（与 `draw_fence` 里的标签矩形一致）：
 /// 网格 = 图标宽 + 4；列表 = 名称列宽。悬停时用它判断标签是否被截断。
 fn label_max_width(fence: &SceneFence, icon: &crate::scene::SceneIcon, theme: &Theme) -> f32 {
     match fence.layout {
-        FenceLayout::Grid => icon.size + 4.0,
+        // 网格：两行容量（标签横跨整格，见 draw_caption）
+        FenceLayout::Grid => ((fence.grid_cell_w - 4.0).max(0.0)) * 2.0,
         FenceLayout::List => fence
             .list_cols
             .map(|c| {
@@ -1585,5 +1713,35 @@ mod tests {
         let c = color([0.2, 0.4, 0.6, 0.8]);
         assert!((c.r - 0.2).abs() < 1e-6);
         assert!((c.a - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn wrap_two_lines_short_text_stays_single_line() {
+        // CJK 每字 12px，宽 72 能放 6 字：5 字单行即可
+        assert_eq!(wrap_two_lines("栅栏示例", 72.0, 12.0), "栅栏示例");
+        // 恰好一行宽：也保持单行
+        assert_eq!(wrap_two_lines("abcdef", 48.0, 12.0), "abcdef");
+    }
+
+    #[test]
+    fn wrap_two_lines_splits_when_overflowing() {
+        // 8 个 CJK 字（96px），每行宽 72（6 字）→ 第一行 6 字 + 第二行 2 字
+        assert_eq!(
+            wrap_two_lines("一二三四五六七八", 72.0, 12.0),
+            "一二三四五六\n七八"
+        );
+    }
+
+    #[test]
+    fn wrap_two_lines_ellipsis_on_third_line() {
+        // 12 个 CJK 字（144px），两行共 12 字 → 第一行 6 字 + 第二行 5 字 + 省略号
+        let out = wrap_two_lines("一二三四五六七八九十一二", 72.0, 12.0);
+        assert_eq!(out, "一二三四五六\n七八九十一…");
+    }
+
+    #[test]
+    fn wrap_two_lines_empty_or_zero_width() {
+        assert_eq!(wrap_two_lines("", 72.0, 12.0), "");
+        assert_eq!(wrap_two_lines("内容", 0.0, 12.0), "");
     }
 }

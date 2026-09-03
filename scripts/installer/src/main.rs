@@ -1,8 +1,20 @@
-//! Sylva 图形化安装程序：亮色安装窗口，可自选安装位置，按当前用户安装。
+//! Sylva 图形化安装/卸载程序：亮色窗口，可自选安装位置，按当前用户安装。
+//!
+//! 双模式：无参数 = 安装；`--uninstall` = 图形化卸载（控制面板卸载项指向
+//! `uninstall.exe --uninstall`，复用同一二进制、同一套 GUI）。
 //!
 //! - **DPI**：内嵌 Per-Monitor v2 清单（见 build.rs）——高缩放下原生渲染不再模糊，
 //!   跨屏/改缩放在 `WM_DPICHANGED` 实时重排布局并重建字体（否则整窗被拉伸、文字错位）。
 //! - **安装位置**：路径编辑框 + 「浏览…」文件夹选择器（`IFileOpenDialog` + `FOS_PICKFOLDERS`）。
+//!   规范化成 `<所选地址>\sylva`：用户选 `D:\Program Files` 会自动补齐为
+//!   `D:\Program Files\sylva`，全部 Sylva 文件（主程序、卸载器、data 数据目录）都在其中。
+//! - **数据目录**：`sylva` 文件夹内建 `data` 子目录，作为后续用户数据与新建栅栏的
+//!   默认存储位置（应用侧以「主程序同目录下存在 data 文件夹」为准）。
+//! - **卸载**：检测到 sylva.exe 仍在运行时提示用户先手动关闭（**不代关、不强杀**）；
+//!   再兜底恢复被隐藏的桌面图标（`SysListView32` 直接显示回来防桌面空白）；
+//!   清注册表/快捷方式；可选保留用户数据（把 `data` 文件夹移到「文档」）；
+//!   删除安装目录内除自身外的全部文件并校验 sylva.exe 已删除，自身交给延迟清理进程
+//!   在本进程退出后删除；完成即自动关闭卸载窗口（不再弹「完成」对话框）。
 //! - **布局**：96 DIP 基准，运行时按 `dpi/96` 缩放；底部按钮按客户区右下角对齐。
 //! - 免管理员权限：默认装到 `%LOCALAPPDATA%\Programs\Sylva`，建桌面/开始菜单快捷方式，
 //!   可选开机自启，注册控制面板卸载项，安装完成后自动启动。
@@ -13,10 +25,12 @@ use std::env;
 use std::fs;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
-use windows::core::{w, PCWSTR, PWSTR};
+use windows::core::{w, BOOL, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, CreateSolidBrush, DeleteObject, RedrawWindow, SetBkColor, SetTextColor,
@@ -27,27 +41,32 @@ use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, IBindCtx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::{PBM_SETBARCOLOR, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH};
+use windows::Win32::UI::Controls::{
+    EM_SETREADONLY, PBM_SETBARCOLOR, PBM_SETPOS, PBM_SETRANGE32, PBS_SMOOTH,
+};
 use windows::Win32::UI::HiDpi::{
     GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Shell::{
     FileOpenDialog, IFileOpenDialog, IShellItem, SHCreateItemFromParsingName, FOS_FORCEFILESYSTEM,
-    FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+    FOS_PICKFOLDERS, SIGDN_FILESYSPATH, FOLDERID_Desktop, SHGetKnownFolderPath,
+    KNOWN_FOLDER_FLAG,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, IsDialogMessageW, LoadIconW, LoadImageW,
-    MessageBoxW, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED,
-    BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, CS_HREDRAW, CS_VREDRAW, ES_AUTOHSCROLL, GWLP_USERDATA,
-    HICON, HMENU, ICON_BIG, ICON_SMALL, IDC_STATIC, IMAGE_ICON, LR_DEFAULTCOLOR, MESSAGEBOX_STYLE,
-    MSG, SM_CXSCREEN, SM_CYSCREEN, STM_SETICON, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_DPICHANGED, WM_GETTEXT, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW, WS_CAPTION,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, EnumChildWindows,
+    FindWindowExW, FindWindowW, GetClassNameW, GetClientRect, GetMessageW, GetSystemMetrics,
+    GetWindowLongPtrW, IsDialogMessageW, LoadIconW, LoadImageW, MessageBoxW, PostQuitMessage,
+    RegisterClassW,
+    SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, CS_HREDRAW,
+    CS_VREDRAW, ES_AUTOHSCROLL, GWLP_USERDATA, HICON, HMENU, ICON_BIG,
+    ICON_SMALL, IDC_STATIC, IMAGE_ICON, LR_DEFAULTCOLOR, MESSAGEBOX_STYLE, MSG, SM_CXSCREEN,
+    SM_CYSCREEN, STM_SETICON, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_GETTEXT, WM_PAINT, WM_SETFONT, WM_SETICON, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 /// 内嵌主程序（编译期打包，安装器独立分发）。
@@ -76,7 +95,24 @@ const ACCENT: COLORREF = COLORREF(0x00_3B_82_F6); // RGB(59,130,246) 进度条�
 /// 子进程不弹出控制台窗口（CREATE_NO_WINDOW）
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+
+
+/// 触发桌面 WorkerW 生成的私有消息（与壳层 takeover.rs 相同的 Progman 技巧）。
+const WM_SPAWN_WORKERW: u32 = 0x052C;
+const CLASS_PROGMAN: &str = "Progman";
+const CLASS_DEFVIEW: &str = "SHELLDLL_DefView";
+const CLASS_LISTVIEW: &str = "SysListView32";
+
+/// 安装 / 卸载双模式（同一窗口布局，按模式切换文案、控件与命令）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Install,
+    Uninstall,
+}
+
 struct Installer {
+    /// 当前模式：决定标题、控件文案、安装/卸载动作与可点击控件。
+    mode: Mode,
     hwnd: HWND,
     /// 头部图标（`LoadImageW` 按 DPI 加载，销毁窗口时释放）。
     hicon: HICON,
@@ -214,7 +250,28 @@ fn reg_add(key: &str, value: &str, data: &str) {
         .status();
 }
 
-/// 默认安装位置：%LOCALAPPDATA%\Programs\Sylva。
+/// 删除注册表值（`value` 为 None 时删除整个键）。
+fn reg_del(key: &str, value: Option<&str>) {
+    let mut args = vec!["delete", key, "/f"];
+    if let Some(v) = value {
+        args.push("/v");
+        args.push(v);
+    }
+    let _ = Command::new("reg").args(&args).creation_flags(CREATE_NO_WINDOW).status();
+}
+
+/// 用 Shell API 获取用户桌面文件夹的真实路径（支持自定义桌面位置）。
+fn shell_desktop_dir() -> Option<PathBuf> {
+    unsafe {
+        let pwstr = SHGetKnownFolderPath(&FOLDERID_Desktop, KNOWN_FOLDER_FLAG(0), None).ok()?;
+        let path = pwstr.to_string().ok()?;
+        windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+        let p = PathBuf::from(&path);
+        p.is_dir().then_some(p)
+    }
+}
+
+/// 默认安装位置：%LOCALAPPDATA%\Programs\Sylva（本身即「sylva 文件夹」）。
 fn default_path() -> String {
     env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -223,6 +280,19 @@ fn default_path() -> String {
         .join("Sylva")
         .to_string_lossy()
         .into_owned()
+}
+
+/// 规范化安装目录：用户选/输入 `D:\Program Files` 时自动补成 `D:\Program Files\sylva`，
+/// 末段已是 `sylva`（不区分大小写，含默认路径）则原样保留。全部 Sylva 相关文件
+/// （主程序、卸载器、data 数据目录）都放进这个 `sylva` 文件夹。
+fn normalize_dest(p: &str) -> PathBuf {
+    let pb = PathBuf::from(p);
+    let last = pb.file_name().map(|s| s.to_string_lossy().to_ascii_lowercase());
+    if last.as_deref() == Some("sylva") {
+        pb
+    } else {
+        pb.join("sylva")
+    }
 }
 
 fn get_path(app: &Installer) -> String {
@@ -280,14 +350,17 @@ fn pick_folder(owner: HWND, current: &str) -> Option<String> {
 }
 
 fn run_install(app: &mut Installer) -> bool {
-    // 读取用户选择/输入的安装目录；空则回退默认
+    // 读取用户选择/输入的安装目录；空则回退默认。规范化成 `...\sylva`：用户选
+    // `D:\Program Files` 会补齐为 `D:\Program Files\sylva`，全部 Sylva 文件都在其中。
     let raw = get_path(app);
     let trimmed = raw.trim().to_string();
     let dest = if trimmed.is_empty() {
-        PathBuf::from(default_path())
+        normalize_dest(&default_path())
     } else {
-        PathBuf::from(&trimmed)
+        normalize_dest(&trimmed)
     };
+    // 回显最终安装目录（让用户看到补全后的路径）
+    set_path(app, &dest.to_string_lossy());
     let autostart = unsafe { SendMessageW(app.hchk, BM_GETCHECK, None, None).0 == 1 };
 
     app.busy = true;
@@ -318,6 +391,25 @@ fn run_install(app: &mut Installer) -> bool {
         return false;
     }
     set_progress(app, 35);
+
+    // 数据目录：`sylva` 文件夹内建 `data` 子目录，存放后续用户数据，
+    // 应用侧新建栅栏的默认存储位置即「主程序同目录下的 data 文件夹」。
+    if let Err(e) = fs::create_dir_all(dest.join("data")) {
+        app.busy = false;
+        set_status(app, "安装失败");
+        msgbox(
+            "Sylva 安装",
+            &format!("无法创建数据目录：\n{}（{e}）", dest.join("data").display()),
+            true,
+        );
+        return false;
+    }
+    // 复制自身作为图形化卸载器（UninstallString → uninstall.exe --uninstall，
+    // 复用同一二进制与 GUI，不再生成 cmd 卸载脚本）。
+    let _ = env::current_exe()
+        .ok()
+        .and_then(|exe| fs::copy(exe, dest.join("uninstall.exe")).ok());
+    set_progress(app, 45);
 
     // 桌面 + 开始菜单快捷方式（PowerShell 编码命令，中文安全）
     let exe_ps = dest
@@ -383,20 +475,11 @@ fn run_install(app: &mut Installer) -> bool {
     reg_add(
         unreg,
         "UninstallString",
-        &format!("\"{}\"", dest.join("uninstall.cmd").display()),
+        &format!("\"{}\" --uninstall", dest.join("uninstall.exe").display()),
     );
     reg_add(unreg, "NoModify", "1");
     reg_add(unreg, "NoRepair", "1");
-    set_progress(app, 85);
-
-    // 卸载脚本（cmd 转义：% → %%，& → ^&，防路径特殊字符破坏命令）
-    let dest_cmd = dest_disp.replace('%', "%%").replace('&', "^&");
-    let uninstall = format!(
-        "@echo off\r\nsetlocal\r\nset DEST={}\r\ntaskkill /IM sylva.exe /F >nul 2>&1\r\nreg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v Sylva /f >nul 2>&1\r\nreg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Sylva\" /f >nul 2>&1\r\ndel \"%USERPROFILE%\\Desktop\\Sylva.lnk\" >nul 2>&1\r\nrd /s /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Sylva\" >nul 2>&1\r\nrd /s /q \"%DEST%\" >nul 2>&1\r\necho Sylva 已卸载。\r\npause\r\n",
-        dest_cmd
-    );
-    let _ = fs::write(dest.join("uninstall.cmd"), uninstall);
-    set_progress(app, 95);
+    set_progress(app, 90);
 
     // 启动
     let _ = Command::new(dest.join("sylva.exe"))
@@ -405,6 +488,261 @@ fn run_install(app: &mut Installer) -> bool {
     set_status(app, "安装完成，Sylva 已启动。");
     set_progress(app, 100);
     true
+}
+
+/// sylva.exe 是否仍在运行（tasklist 轮询）。查询失败按已退出处理，避免无限等待。
+fn sylva_running() -> bool {
+    match Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq sylva.exe", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .to_ascii_lowercase()
+            .contains("sylva.exe"),
+        Err(_) => false,
+    }
+}
+
+/// 定位安装目录：优先取本程序所在目录（卸载器与主程序同目录），
+/// 兜底读注册表 `InstallLocation`。
+fn detect_install_dir() -> Option<PathBuf> {
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if dir.join("sylva.exe").is_file() {
+                return Some(dir.to_path_buf());
+            }
+        }
+    }
+    let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Sylva";
+    let out = Command::new("reg")
+        .args(["query", key, "/v", "InstallLocation"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().find(|l| l.contains("InstallLocation"))?;
+    let idx = line.find("REG_SZ")?;
+    let p = line[idx + "REG_SZ".len()..].trim();
+    if !p.is_empty() && Path::new(p).join("sylva.exe").is_file() {
+        return Some(PathBuf::from(p));
+    }
+    None
+}
+
+/// 递归查找类名窗口的上下文。
+struct FindCtx {
+    class_name: String,
+    found: Option<HWND>,
+}
+
+unsafe extern "system" fn enum_child_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let ctx = &mut *(lparam.0 as *mut FindCtx);
+    if ctx.found.is_some() {
+        return BOOL(0); // 已找到，停止
+    }
+    let mut buf = [0u16; 256];
+    let n = GetClassNameW(hwnd, &mut buf);
+    if n > 0 {
+        let cls = String::from_utf16_lossy(&buf[..n as usize]);
+        if cls == ctx.class_name {
+            ctx.found = Some(hwnd);
+            return BOOL(0);
+        }
+    }
+    BOOL(1)
+}
+
+/// 在 `hwnd` 子树中递归查找第一个指定类名的窗口。
+fn find_class_descendant(hwnd: HWND, class_name: &str) -> Option<HWND> {
+    let mut ctx = FindCtx {
+        class_name: class_name.to_string(),
+        found: None,
+    };
+    let _ = unsafe {
+        EnumChildWindows(
+            Some(hwnd),
+            Some(enum_child_cb),
+            LPARAM(&mut ctx as *mut _ as isize),
+        )
+    };
+    ctx.found
+}
+
+/// 定位 `SHELLDLL_DefView`：先试顶层，再递归 Progman 子树
+/// （Wallpaper Engine 会把 DefView 重挂到它新建的 WorkerW 下）。
+fn find_def_view() -> Option<HWND> {
+    if let Ok(top) = unsafe { FindWindowW(PCWSTR(wide(CLASS_DEFVIEW).as_ptr()), None) } {
+        if !top.is_invalid() {
+            return Some(top);
+        }
+    }
+    let progman = unsafe { FindWindowW(PCWSTR(wide(CLASS_PROGMAN).as_ptr()), None) }
+        .ok()
+        .filter(|h| !h.is_invalid())?;
+    find_class_descendant(progman, CLASS_DEFVIEW)
+}
+
+/// 兜底恢复真实桌面图标：即使应用没走干净退出，也直接把隐藏的
+/// `SysListView32` 显示回来，杜绝「桌面空白」。
+fn restore_desktop_icons() {
+    unsafe {
+        if let Ok(progman) = FindWindowW(PCWSTR(wide(CLASS_PROGMAN).as_ptr()), None) {
+            if !progman.is_invalid() {
+                let _ = SendMessageW(progman, WM_SPAWN_WORKERW, None, None);
+            }
+        }
+        if let Some(dv) = find_def_view() {
+            if let Ok(lv) = FindWindowExW(Some(dv), None, PCWSTR(wide(CLASS_LISTVIEW).as_ptr()), None) {
+                if !lv.is_invalid() {
+                    let _ = ShowWindow(lv, SW_SHOW);
+                }
+            }
+        }
+    }
+}
+
+/// 图形化卸载：不代关 Sylva（检测到运行先提示用户手动关闭）；兜底恢复桌面图标；
+/// 清注册表 / 快捷方式；删除用户数据；删除安装目录内
+/// 除自身外的全部文件并校验 sylva.exe 已删除；自身由延迟清理进程在退出后删除。
+/// 返回 true = 已卸载完成（调用方销毁窗口，自动关闭）。
+fn run_uninstall(app: &mut Installer) -> bool {
+    let dest = detect_install_dir();
+    let dest_str = dest.as_ref().map(|d| d.to_string_lossy().into_owned());
+    app.busy = true;
+
+    // 1. 若 Sylva 仍在运行：提示用户先关闭，而不是代为关闭（不强杀、不 WM_CLOSE）。
+    //    窗口保持打开，用户手动关掉 Sylva 后可再次点击「卸载」。
+    set_status(app, "正在检查 Sylva 运行状态…");
+    set_progress(app, 8);
+    if sylva_running() {
+        app.busy = false;
+        set_status(app, "请先关闭 Sylva 再卸载");
+        msgbox(
+            "Sylva 卸载",
+            "检测到 Sylva 正在运行。\n\n请先关闭 Sylva 窗口，再点击「卸载」。",
+            false,
+        );
+        return false;
+    }
+    set_progress(app, 20);
+
+    // 2. 兜底：直接把真实图标列表显示回来，防桌面空白
+    set_status(app, "正在恢复桌面图标…");
+    restore_desktop_icons();
+    set_progress(app, 35);
+
+    // 3. 注册表：开机自启 + 控制面板卸载项
+    set_status(app, "正在清除注册表项…");
+    reg_del(
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+        Some("Sylva"),
+    );
+    reg_del(
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Sylva",
+        None,
+    );
+    set_progress(app, 55);
+
+    // 4. 桌面 + 开始菜单快捷方式（用 Shell API 获取真实桌面路径，支持自定义桌面位置）
+    set_status(app, "正在删除快捷方式…");
+    if let Some(desktop) = shell_desktop_dir() {
+        let _ = fs::remove_file(desktop.join("Sylva.lnk"));
+    }
+    // 兜底：也尝试 USERPROFILE\Desktop（Shell API 失败时）
+    if let Some(profile) = env::var_os("USERPROFILE").map(PathBuf::from) {
+        let _ = fs::remove_file(profile.join("Desktop").join("Sylva.lnk"));
+    }
+    // 开始菜单
+    if let Some(profile) = env::var_os("USERPROFILE").map(PathBuf::from) {
+        let _ = fs::remove_dir_all(
+            profile.join(r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Sylva"),
+        );
+    }
+    set_progress(app, 70);
+    set_progress(app, 80);
+
+    // 6. 删除安装目录内容：运行中的自身 uninstall.exe 除外（Windows 不允许删除
+    //    运行中的 exe，交给延迟清理进程在退出后删除），其余全部删掉。
+    set_status(app, "正在删除安装文件…");
+    if let Some(d) = &dest {
+        if let Ok(entries) = fs::read_dir(d) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.file_name()
+                    .map(|n| n.to_string_lossy().to_ascii_lowercase() == "uninstall.exe")
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let r = if p.is_dir() {
+                    fs::remove_dir_all(&p)
+                } else {
+                    fs::remove_file(&p)
+                };
+                let _ = r; // 失败项由延迟清理整目录删除兜底
+            }
+        }
+    }
+
+    // 校验主程序确已删除（「软件依然存在」的核心）
+    let ok = dest
+        .as_ref()
+        .map(|d| !d.join("sylva.exe").exists())
+        .unwrap_or(true);
+
+    set_progress(app, 100);
+    if !ok {
+        app.busy = false;
+        set_status(app, "卸载未完成：sylva.exe 仍被占用");
+        msgbox(
+            "Sylva 卸载",
+            &format!(
+                "无法删除主程序 sylva.exe，可能仍被其他程序占用。\n\n请关闭相关程序后重试：\n{}",
+                dest_str.unwrap_or_default()
+            ),
+            true,
+        );
+        return false;
+    }
+
+    // 7. 成功：剩余文件（含自身 uninstall.exe）交给延迟清理进程在退出后整目录删除；
+    //    状态提示片刻后由调用方销毁窗口自动关闭（不再弹「完成」对话框）。
+    if let Some(d) = &dest {
+        spawn_delayed_cleanup(d, std::process::id());
+    }
+    set_status(app, "Sylva 已卸载完成。");
+    thread::sleep(Duration::from_millis(900));
+    true
+}
+
+/// 启动一个脱离的延迟清理进程：轮询等本进程退出（最长 60s）后递归删除整个安装
+/// 目录。用于删除运行中的 uninstall.exe 自身——Windows 不允许删除运行中的 exe，
+/// 只能在其退出后由外部进程移除。删除带重试，容忍 exe 映像句柄延迟释放。
+fn spawn_delayed_cleanup(dest: &Path, self_pid: u32) {
+    let d = dest.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "for($i=0;$i -lt 60;$i++){{ \
+         if(-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)){{break}}; \
+         Start-Sleep -Seconds 1 }}; \
+         for($i=0;$i -lt 10;$i++){{ \
+         Remove-Item -LiteralPath '{dest}' -Recurse -Force -ErrorAction SilentlyContinue; \
+         if(-not (Test-Path -LiteralPath '{dest}')){{break}}; \
+         Start-Sleep -Milliseconds 500 }}",
+        pid = self_pid,
+        dest = d
+    );
+    let encoded = encode_command(&script);
+    let _ = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            &encoded,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
 }
 
 /// 把脚本编码为 UTF-16LE Base64（PowerShell -EncodedCommand，中文安全）。
@@ -593,20 +931,28 @@ unsafe extern "system" fn wnd_proc(
                 let id = wparam.0 & 0xFFFF;
                 let code = wparam.0 >> 16;
                 if code == BN_CLICKED as usize {
-                    match id {
-                        ID_BTN_INSTALL if !app.busy => {
+                    match (app.mode, id) {
+                        (Mode::Install, ID_BTN_INSTALL) if !app.busy => {
                             let ok = run_install(app);
                             if ok {
                                 to_destroy = Some(app.hwnd);
                             }
                         }
-                        ID_BTN_BROWSE if !app.busy => {
-                            let cur = get_path(app);
-                            if let Some(p) = pick_folder(hwnd, &cur) {
-                                set_path(app, &p);
+                        (Mode::Uninstall, ID_BTN_INSTALL) if !app.busy => {
+                            let ok = run_uninstall(app);
+                            if ok {
+                                to_destroy = Some(app.hwnd);
                             }
                         }
-                        ID_BTN_CANCEL if !app.busy => {
+                        (Mode::Install, ID_BTN_BROWSE) if !app.busy => {
+                            let cur = get_path(app);
+                            if let Some(p) = pick_folder(hwnd, &cur) {
+                                // 规范化：选 `D:\Program Files` 补成 `D:\Program Files\sylva`
+                                let norm = normalize_dest(&p);
+                                set_path(app, &norm.to_string_lossy());
+                            }
+                        }
+                        (_, ID_BTN_CANCEL) if !app.busy => {
                             to_destroy = Some(hwnd);
                         }
                         _ => {}
@@ -684,6 +1030,17 @@ unsafe extern "system" fn wnd_proc(
 }
 
 fn main() {
+    // 双模式：控制面板卸载项 → `uninstall.exe --uninstall`；否则为安装。
+    let mode = if env::args().any(|a| a == "--uninstall") {
+        Mode::Uninstall
+    } else {
+        Mode::Install
+    };
+    let title = wide(match mode {
+        Mode::Install => "Sylva 安装程序",
+        Mode::Uninstall => "Sylva 卸载程序",
+    });
+
     // 清单已声明 PerMonitorV2；此处再调一次作双保险（已有感知时返回 Err，忽略即可）。
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     unsafe {
@@ -713,7 +1070,7 @@ fn main() {
         CreateWindowExW(
             Default::default(),
             class_name,
-            w!("Sylva 安装程序"),
+            PCWSTR(title.as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             0,
             0,
@@ -765,6 +1122,7 @@ fn main() {
     let hicon = load_header_icon(hinstance, dpi);
 
     let mut app = Installer {
+        mode,
         hwnd,
         hicon,
         hicon_static: HWND::default(),
@@ -826,21 +1184,33 @@ fn main() {
     );
     app.hsub = mk(
         &wide("STATIC"),
-        &wide("桌面图标整理器 · Windows 10/11 · 免管理员权限"),
+        &wide(if matches!(mode, Mode::Uninstall) {
+            "将卸载 Sylva，并恢复被隐藏的桌面图标。"
+        } else {
+            "桌面图标整理器 · Windows 10/11 · 免管理员权限"
+        }),
         st(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0),
         Default::default(),
         idc,
     );
     app.hsection = mk(
         &wide("STATIC"),
-        &wide("安装位置"),
+        &wide(if matches!(mode, Mode::Uninstall) {
+            "已安装位置"
+        } else {
+            "安装位置"
+        }),
         st(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0),
         Default::default(),
         idc,
     );
     app.hhint = mk(
         &wide("STATIC"),
-        &wide("将安装到所选文件夹，并创建桌面 / 开始菜单快捷方式。"),
+        &wide(if matches!(mode, Mode::Uninstall) {
+            "将删除快捷方式、注册表项及用户数据。"
+        } else {
+            "将安装到所选文件夹，并创建桌面 / 开始菜单快捷方式，同时建立 sylva 数据目录。"
+        }),
         st(WS_CHILD.0 | WS_VISIBLE.0 | WS_CLIPSIBLINGS.0),
         Default::default(),
         idc,
@@ -868,7 +1238,11 @@ fn main() {
     );
     app.hchk = mk(
         &wide("BUTTON"),
-        &wide("开机时自动启动 Sylva"),
+        &wide(if matches!(mode, Mode::Uninstall) {
+            "保留用户数据（data 文件夹移到「文档」）"
+        } else {
+            "开机时自动启动 Sylva"
+        }),
         st(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_CLIPSIBLINGS.0 | (BS_AUTOCHECKBOX as u32)),
         Default::default(),
         ID_CHK_AUTOSTART,
@@ -889,7 +1263,11 @@ fn main() {
     );
     app.hbtn_install = mk(
         &wide("BUTTON"),
-        &wide("安装"),
+        &wide(if matches!(mode, Mode::Uninstall) {
+            "卸载"
+        } else {
+            "安装"
+        }),
         st(WS_CHILD.0
             | WS_VISIBLE.0
             | WS_TABSTOP.0
@@ -906,9 +1284,31 @@ fn main() {
         ID_BTN_CANCEL,
     );
 
-    // 初始化：默认安装路径、勾选自启、进度条范围与颜色、头部图标
-    set_path(&app, &default_path());
+    // 初始化：安装=默认路径 / 卸载=检测到的安装目录；勾选对应默认项；
+    // 进度条范围与颜色；头部图标。
+    if matches!(mode, Mode::Install) {
+        set_path(&app, &default_path());
+    } else {
+        // 卸载模式：显示检测到的安装目录（只读），隐藏「浏览…」按钮
+        let dir = detect_install_dir()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "未找到 Sylva 安装目录".into());
+        set_path(&app, &dir);
+        let _ = unsafe { ShowWindow(app.hbtn_browse, SW_HIDE) };
+        unsafe {
+            let _ = SendMessageW(
+                app.hpath,
+                EM_SETREADONLY,
+                Some(WPARAM(1)),
+                Some(LPARAM(0)),
+            );
+        }
+    }
     unsafe {
+        // 卸载模式：隐藏复选框（默认删除用户数据，不再提供保留选项）
+        if matches!(app.mode, Mode::Uninstall) {
+            let _ = ShowWindow(app.hchk, SW_HIDE);
+        }
         let _ = SendMessageW(app.hchk, BM_SETCHECK, Some(WPARAM(BST_CHECKED)), None);
         let _ = SendMessageW(
             app.hprogress,

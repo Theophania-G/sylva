@@ -72,6 +72,11 @@ pub struct Theme {
     pub list_label_gap: f32,
 }
 
+/// 网格图标下方文件名标签：两行总高 = `label.size` 的倍数（DWrite 每行实际行高约
+/// 1.1 倍字号 + 余量）。App 布局（行高/编辑框）与 Render 绘制（标签框）共用同一
+/// 常量，保证二者一致不重叠。
+pub const GRID_CAPTION_H_MULT: f32 = 2.6;
+
 impl Default for Theme {
     fn default() -> Self {
         // 现代深色半透明栅栏；具体数值在 M4 视觉打磨阶段调整。
@@ -89,7 +94,8 @@ impl Default for Theme {
             },
             title_padding_bottom: 10.0,
             icon_size: 48.0,
-            icon_gap: 16.0,
+            // 网格格宽保底 = 1.5×图标宽（见 app 层 grid_cell_w），种子栅栏宽度估算对齐
+            icon_gap: 24.0,
             icon_caption_gap: 6.0,
             label: TextStyle {
                 font_family: "Microsoft YaHei UI",
